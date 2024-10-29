@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+message AchievementAllDataNotify {
+    repeated Achievement achievement_list = 4;
+    repeated uint32 reward_taken_goal_id_list = 5;
+}
+
+message Achievement {
+  uint32 cur_progress = 15;
+  uint32 total_progress = 5;
+  uint32 finish_timestamp = 11;
+  Status status = 7;
+  uint32 id = 2;
+  enum Status {
+    STATUS_INVALID = 0;
+    STATUS_UNFINISHED = 1;
+    STATUS_FINISHED = 2;
+    STATUS_REWARD_TAKEN = 3;
+  }
+}
+
+message GetPlayerTokenRsp {
+  bytes security_cmd_buffer = 3;
+  string account_uid = 1;
+  uint32 uid = 5;
+  uint32 platform_type = 12;
+  string token = 8;
+  string server_rand_key = 668;
+  uint32 key_id = 1305;
+  string client_ip_str = 1202;
+  string msg = 14;
+  string country_code = 555;
+  string game_biz = 333;
+  repeated uint32 finish_collection_id_list = 164;
+  string sign = 1499;
+  uint32 black_uid_end_time = 7;
+  uint32 account_type = 120;
+  bool is_proficient_player = 500;
+  int32 retcode = 100;
+  uint64 secret_key_seed = 2;
+  bool is_guest = 300;
+  bytes extra_bin_data = 9;
+  uint32 gm_uid = 10;
+  // string secret_key = 11;
+  StopServerInfo stop_server = 563;
+  uint32 tag = 853;
+  string psn_id = 1402;
+  string client_version_random_key = 678;
+  uint32 channel_id = 259;
+  uint32 reg_platform = 1241;
+  string birthday = 1437;
+  uint32 sub_channel_id = 141;
+  uint32 cloud_client_ip = 508;
+}
+
+message StopServerInfo {
+  uint32 stop_begin_time = 1;
+  uint32 stop_end_time = 2;
+  string url = 3;
+  string content_msg = 4;
+}
+
+message PacketHead {
+	uint32 packet_id = 1;
+	uint32 rpc_id = 2;
+	uint32 client_sequence_id = 3;
+	uint32 enet_channel_id = 4;
+	uint32 enet_is_reliable = 5;
+	uint64 sent_ms = 6;
+	uint32 user_id = 11;
+	uint32 user_ip = 12;
+	uint32 user_session_id = 13;
+	uint64 recv_time_ms = 21;
+	uint32 rpc_begin_time_ms = 22;
+	map<uint32, uint32> ext_map = 23;
+	uint32 sender_app_id = 24;
+	uint32 source_service = 31;
+	uint32 target_service = 32;
+	map<uint32, uint32> service_app_id_map = 33;
+	bool is_set_game_thread = 34;
+	uint32 game_thread_index = 35;
+}
+
