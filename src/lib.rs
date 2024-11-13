@@ -20,7 +20,7 @@
 //!
 //! ## Example
 //! ```
-//! use artifactarium::network::{GamePacket, GameSniffer, ConnectionPacket};
+//! use auto_artifactarium::{GamePacket, GameSniffer, ConnectionPacket};
 //!
 //! let packets: Vec<Vec<u8>> = vec![/**/];
 //!
@@ -33,7 +33,7 @@
 //!         }
 //!         Some(GamePacket::Commands(commands)) => {
 //!             for command in commands {
-//!                 println!("{:?}", command.get_command_name());
+//!                 println!("{:?}", command);
 //!             }
 //!         }
 //!         _ => {}
@@ -48,15 +48,16 @@ use std::fmt::Write;
 
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use rsa::{pkcs1::DecodeRsaPrivateKey, Pkcs1v15Encrypt, RsaPrivateKey};
+use rsa::{pkcs1::DecodeRsaPrivateKey, RsaPrivateKey};
 use tracing::{error, info, info_span, instrument, trace, warn};
 
 use crate::connection::parse_connection_packet;
 use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
-use crate::gen::protos::GetPlayerTokenRsp;
+// use crate::gen::protos::GetPlayerTokenRsp;
 use crate::gen::protos::PacketHead;
 use crate::kcp::KcpSniffer;
 use crate::Key::Dispatch;
+use crate::unk_util::{Achievement, matches_achievement_all_data_notify, matches_get_player_token_rsp};
 
 fn bytes_as_hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut output, b| {
@@ -65,13 +66,14 @@ fn bytes_as_hex(bytes: &[u8]) -> String {
     })
 }
 
-pub mod command_id;
+// pub mod command_id;
 pub mod gen;
 
 mod connection;
 mod crypto;
 mod cs_rand;
 mod kcp;
+mod unk_util;
 
 const PORTS: [u16; 2] = [22101, 22102];
 
@@ -180,10 +182,9 @@ pub struct GameSniffer {
     recv_kcp: Option<KcpSniffer>,
     key: Option<Key>,
     initial_keys: HashMap<u16, Vec<u8>>,
-    key_4: Option<RsaPrivateKey>,
-    key_5: Option<RsaPrivateKey>,
+    rsa_keys: Vec<RsaPrivateKey>,
     sent_time: Option<u64>,
-    seed: Option<u64>,
+    possible_seeds: Vec<u64>,
 }
 
 impl GameSniffer {
@@ -191,12 +192,13 @@ impl GameSniffer {
         let pem_data_4 = include_str!("../keys/private_key_4.pem");
         let pem_data_5 = include_str!("../keys/private_key_5.pem");
 
-        let rsa_4 = RsaPrivateKey::from_pkcs1_pem(pem_data_4).unwrap();
-        let rsa_5 = RsaPrivateKey::from_pkcs1_pem(pem_data_5).unwrap();
+        let rsa_4 = RsaPrivateKey::from_pkcs1_pem(pem_data_4);
+        let rsa_5 = RsaPrivateKey::from_pkcs1_pem(pem_data_5);
 
         GameSniffer {
-            key_4: Some(rsa_4),
-            key_5: Some(rsa_5),
+            rsa_keys: vec![rsa_4, rsa_5].iter()
+                .filter_map(|rsa_key| rsa_key.clone().ok())
+                .collect(),
             ..Default::default()
         }
     }
@@ -280,17 +282,24 @@ impl GameSniffer {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45 && test[1] == 0x67 {
-                    //|| test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB
+                if test[0] == 0x45 && test[1] == 0x67
+                    && test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB  {
                     self.key.as_ref().unwrap()
                 } else {
-                    let key = bruteforce(self.sent_time.unwrap(), self.seed.unwrap(), data.clone());
-                    match key {
-                        Some(key) => {
-                            self.key = Some(Key::Session(key));
-                            self.key.as_ref().unwrap()
+                    let mut discovered_key: Option<&Key> = None;
+                    for &seed in &self.possible_seeds {
+                        let key = bruteforce(self.sent_time.unwrap(), seed, data.clone());
+                        match key {
+                            Some(key) => {
+                                self.key = Some(Key::Session(key));
+                                discovered_key = self.key.as_ref()
+                            }
+                            None => ()
                         }
-                        None => panic!("Couldn't bruteforce key!"),
+                    }
+                    match discovered_key {
+                        Some(key) => key,
+                        None => panic!("Couldn't bruteforce from deduced keys")
                     }
                 }
             }
@@ -323,35 +332,27 @@ impl GameSniffer {
         info!("received");
         trace!(data = BASE64_STANDARD.encode(&command.proto_data), "data");
 
-        if !matches!(
-            command.command_id,
-            command_id::GET_PLAYER_TOKEN_RSP | command_id::ACHIEVEMENT_ALL_DATA_NOTIFY
-        ) {
-            return None;
-        }
+        // if !matches!(
+        //     command.command_id,
+        //     command_id::GET_PLAYER_TOKEN_RSP | command_id::ACHIEVEMENT_ALL_DATA_NOTIFY
+        // ) {
+        //     return None;
+        // }
 
-        if command.command_id == command_id::GET_PLAYER_TOKEN_RSP {
-            let token_command = command.parse_proto::<GetPlayerTokenRsp>().unwrap();
-            let server_rand_key = token_command.server_rand_key;
-            let seed = BASE64_STANDARD.decode(server_rand_key).unwrap();
-            let decr_key = match token_command.key_id {
-                4 => &self.key_4,
-                5 => &self.key_5,
-                _ => &self.key_5,
-            };
-            let seed = match decr_key {
-                Some(key) => key.decrypt(Pkcs1v15Encrypt, &seed).unwrap(),
-                None => {
-                    panic!("RSA key didn't decrypt")
-                }
-            };
-            self.seed = Some(u64::from_be_bytes(seed[..8].try_into().unwrap()));
-            info!(?self.seed, "setting new session seed");
-            let header_command = command.parse_proto::<PacketHead>().unwrap();
-            self.sent_time = Some(header_command.sent_ms);
-            info!(?self.sent_time, "setting new send time");
+        if let Some(Dispatch(_)) = self.key {
+            if let Some(possible_seeds) = matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone()) {
+                self.possible_seeds = possible_seeds;
+                info!(?self.possible_seeds, "setting new possible session seeds");
+                let header_command = command.parse_proto::<PacketHead>().unwrap();
+                self.sent_time = Some(header_command.sent_ms);
+                info!(?self.sent_time, "setting new send time");
+            }
         }
 
         Some(command)
     }
+}
+
+pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achievement>> {
+    return matches_achievement_all_data_notify(game_command.proto_data.clone())
 }

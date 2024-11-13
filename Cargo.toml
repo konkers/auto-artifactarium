@@ -1,5 +1,5 @@
 [package]
-name = "artifactarium"
+name = "auto-artifactarium"
 version = "1.0.0"
 edition = "2021"
 license = "MIT"
@@ -10,7 +10,7 @@ license = "MIT"
 base64 = "0.22"
 etherparse = "0.16.0"
 kcp = "0.5"
-protobuf = "3.5.1"
+protobuf = "3.7.1"
 rand_mt = "4.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
