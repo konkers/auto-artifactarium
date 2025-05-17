@@ -274,7 +274,8 @@ impl GameSniffer {
                         self.key.as_ref().unwrap()
                     }
                     None => {
-                        panic!("No dispatch key found")
+                        error!("No dispatch key found");
+                        return None;
                     }
                 }
             }
@@ -299,7 +300,10 @@ impl GameSniffer {
                     }
                     match discovered_key {
                         Some(key) => key,
-                        None => panic!("Couldn't bruteforce from deduced keys")
+                        None => {
+                            error!("Couldn't bruteforce from deduced keys");
+                            return None
+                        }
                     }
                 }
             }
@@ -313,7 +317,8 @@ impl GameSniffer {
                 } else {
                     warn!("Invalidated session key");
                     self.key = None;
-                    panic!("Session key dead, relaunch game")
+                    error!("Session key dead, relaunch game");
+                    return None
                 }
             }
         };
