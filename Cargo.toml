@@ -1,6 +1,6 @@
 [package]
 name = "auto-artifactarium"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 
@@ -9,11 +9,9 @@ license = "MIT"
 [dependencies]
 base64 = "0.22"
 etherparse = "0.16.0"
-kcp = "0.5"
+kcp = { git = "https://github.com/hashblen/mhy-kcp" }
 protobuf = "3.7.1"
 rand_mt = "4.2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 tracing = "0.1"
 rsa = "0.9"
 
