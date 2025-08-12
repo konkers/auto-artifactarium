@@ -7,6 +7,9 @@ use protobuf::UnknownValueRef::*;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 
 use crate::gen::protos::Unk;
+use crate::gen::protos::PacketWithItems;
+use crate::gen::protos::item;
+use crate::gen::protos::equip;
 
 pub fn matches_get_player_token_rsp(data: Vec<u8>, rsa_keys: Vec<RsaPrivateKey>) -> Option<Vec<u64>> {
     let d_msg = Unk::parse_from_bytes(&data);
@@ -155,5 +158,48 @@ pub fn matches_achievement_all_data_notify(data: Vec<u8>) -> Option<Vec<Achievem
             Some(achievements)
         }
         _ => None
+    }
+}
+
+#[derive(Default)]
+pub struct Artifact {
+    pub id: u32,
+    pub level: u32,
+    pub exp: u32,
+    pub promote_level: u32,
+    pub main_prop_id: u32,
+    pub append_prop_id_list: Vec<u32>,
+    pub is_locked: bool,
+}
+
+pub fn matches_artifact_all_data_notify(data: Vec<u8>) -> Option<Vec<Artifact>> {
+    let packet = PacketWithItems::parse_from_bytes(&data).ok()?;
+
+    let artifacts: Vec<Artifact> = packet.items.iter()
+        .filter_map(|item| {
+            match &item.detail {
+                Some(item::Detail::Equip(equip)) => {
+                    match &equip.detail {
+                        Some(equip::Detail::Reliquary(r)) => Some(Artifact {
+                            id: item.item_id,
+                            level: r.level,
+                            exp: r.exp,
+                            promote_level: r.promote_level,
+                            main_prop_id: r.main_prop_id,
+                            append_prop_id_list: r.append_prop_id_list.to_vec(),
+                            is_locked: equip.is_locked,
+                        }),
+                        _ => None,
+                    }
+                },
+                _ => None,
+            }
+        })
+        .collect();
+
+    if artifacts.is_empty() {
+        None
+    } else {
+        Some(artifacts)
     }
 }
