@@ -9,6 +9,8 @@ use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 use crate::gen::protos::Unk;
 use crate::gen::protos::PacketWithItems;
 use crate::gen::protos::Item;
+use crate::gen::protos::AvatarDataNotify;
+use crate::gen::protos::AvatarInfo;
 
 pub fn matches_get_player_token_rsp(data: Vec<u8>, rsa_keys: Vec<RsaPrivateKey>) -> Option<Vec<u64>> {
     let d_msg = Unk::parse_from_bytes(&data);
@@ -162,4 +164,8 @@ pub fn matches_achievement_all_data_notify(data: Vec<u8>) -> Option<Vec<Achievem
 
 pub fn matches_items_all_data_notify(data: &Vec<u8>) -> Option<Vec<Item>> {
     Some(PacketWithItems::parse_from_bytes(data).ok()?.items)
+}
+
+pub fn matches_avatars_all_data_notify(data: &Vec<u8>) -> Option<Vec<AvatarInfo>> {
+    Some(AvatarDataNotify::parse_from_bytes(data).ok()?.avatar_list)
 }

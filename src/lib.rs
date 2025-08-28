@@ -57,7 +57,7 @@ use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
 use crate::gen::protos::PacketHead;
 use crate::kcp::KcpSniffer;
 use crate::Key::Dispatch;
-use crate::unk_util::{Achievement, matches_achievement_all_data_notify, matches_get_player_token_rsp, matches_items_all_data_notify};
+use crate::unk_util::{Achievement, matches_achievement_all_data_notify, matches_get_player_token_rsp, matches_items_all_data_notify, matches_avatars_all_data_notify};
 
 fn bytes_as_hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut output, b| {
@@ -364,4 +364,8 @@ pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achi
 
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::Item>> {
     return matches_items_all_data_notify(&game_command.proto_data)
+}
+
+pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::AvatarInfo>> {
+    return matches_avatars_all_data_notify(&game_command.proto_data)
 }

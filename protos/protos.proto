@@ -95,3 +95,20 @@ message Item {
 message PacketWithItems {
 	repeated Item items = 10;
 }
+
+message AvatarInfo {
+    uint32 avatar_id = 1;
+    uint64 guid = 2;
+    repeated uint64 equip_guid_list = 5;
+    map<uint32, uint32> skill_level_map = 15;
+}
+
+message AvatarTeam {
+    string team_name = 6;
+    repeated uint64 avatar_guid_list = 15;
+}
+
+message AvatarDataNotify {
+    repeated AvatarInfo avatar_list = 13;
+    map<uint32, AvatarTeam> avatar_team_map = 14;
+}
