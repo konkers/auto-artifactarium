@@ -56,7 +56,7 @@ pub fn matches_get_player_token_rsp(
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Achievement {
     pub id: u32,
     pub status: u32,
