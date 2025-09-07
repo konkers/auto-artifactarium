@@ -22,7 +22,7 @@ pub fn matches_get_player_token_rsp(
             let mut to_ret: Vec<u64> = vec![];
             let unknown_fields = d_msg.unknown_fields();
             for (field_number, field_data) in unknown_fields.iter() {
-                println!("field: {}: {:?}", field_number, field_data);
+                tracing::debug!("field: {}: {:?}", field_number, field_data);
                 let possible_encrypted = match field_data {
                     LengthDelimited(encrypted_bytes) => {
                         let encrypted = BASE64_STANDARD.decode(encrypted_bytes);
