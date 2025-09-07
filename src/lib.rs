@@ -56,8 +56,11 @@ use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
 // use crate::gen::protos::GetPlayerTokenRsp;
 use crate::gen::protos::PacketHead;
 use crate::kcp::KcpSniffer;
+use crate::unk_util::{
+    matches_achievement_all_data_notify, matches_avatars_all_data_notify,
+    matches_get_player_token_rsp, matches_items_all_data_notify, Achievement,
+};
 use crate::Key::Dispatch;
-use crate::unk_util::{Achievement, matches_achievement_all_data_notify, matches_get_player_token_rsp, matches_items_all_data_notify, matches_avatars_all_data_notify};
 
 fn bytes_as_hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut output, b| {
@@ -196,7 +199,8 @@ impl GameSniffer {
         let rsa_5 = RsaPrivateKey::from_pkcs1_pem(pem_data_5);
 
         GameSniffer {
-            rsa_keys: vec![rsa_4, rsa_5].iter()
+            rsa_keys: vec![rsa_4, rsa_5]
+                .iter()
                 .filter_map(|rsa_key| rsa_key.clone().ok())
                 .collect(),
             ..Default::default()
@@ -283,8 +287,11 @@ impl GameSniffer {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45 && test[1] == 0x67
-                    && test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB  {
+                if test[0] == 0x45
+                    && test[1] == 0x67
+                    && test[test.len() - 2] == 0x89
+                    && test[test.len() - 1] == 0xAB
+                {
                     self.key.as_ref().unwrap()
                 } else {
                     let mut discovered_key: Option<&Key> = None;
@@ -295,14 +302,14 @@ impl GameSniffer {
                                 self.key = Some(Key::Session(key));
                                 discovered_key = self.key.as_ref()
                             }
-                            None => ()
+                            None => (),
                         }
                     }
                     match discovered_key {
                         Some(key) => key,
                         None => {
                             error!("Couldn't bruteforce from deduced keys");
-                            return None
+                            return None;
                         }
                     }
                 }
@@ -318,7 +325,7 @@ impl GameSniffer {
                     warn!("Invalidated session key");
                     self.key = None;
                     error!("Session key dead, relaunch game");
-                    return None
+                    return None;
                 }
             }
         };
@@ -345,7 +352,9 @@ impl GameSniffer {
         // }
 
         if let Some(Dispatch(_)) = self.key {
-            if let Some(possible_seeds) = matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone()) {
+            if let Some(possible_seeds) =
+                matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone())
+            {
                 self.possible_seeds = possible_seeds;
                 info!(?self.possible_seeds, "setting new possible session seeds");
                 let header_command = command.parse_proto::<PacketHead>().unwrap();
@@ -359,13 +368,13 @@ impl GameSniffer {
 }
 
 pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achievement>> {
-    return matches_achievement_all_data_notify(game_command.proto_data.clone())
+    return matches_achievement_all_data_notify(game_command.proto_data.clone());
 }
 
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::Item>> {
-    return matches_items_all_data_notify(&game_command.proto_data)
+    return matches_items_all_data_notify(&game_command.proto_data);
 }
 
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::AvatarInfo>> {
-    return matches_avatars_all_data_notify(&game_command.proto_data)
+    return matches_avatars_all_data_notify(&game_command.proto_data);
 }

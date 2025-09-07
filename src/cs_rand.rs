@@ -81,8 +81,12 @@ impl Random {
 
         ret_val = self.seed_array[loc_inext as usize] - self.seed_array[loc_inextp as usize];
 
-        if ret_val == self.m_big { ret_val -= 1 };
-        if ret_val < 0 { ret_val += self.m_big };
+        if ret_val == self.m_big {
+            ret_val -= 1
+        };
+        if ret_val < 0 {
+            ret_val += self.m_big
+        };
 
         self.seed_array[loc_inext as usize] = ret_val;
 
