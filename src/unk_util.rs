@@ -176,10 +176,35 @@ pub fn matches_achievement_all_data_notify(data: Vec<u8>) -> Option<Vec<Achievem
     }
 }
 
-pub fn matches_items_all_data_notify(data: &Vec<u8>) -> Option<Vec<Item>> {
-    Some(PacketWithItems::parse_from_bytes(data).ok()?.items)
+pub fn matches_items_all_data_notify(data: &[u8]) -> Option<Vec<Item>> {
+    let packet = PacketWithItems::parse_from_bytes(data).ok()?;
+
+    // Filter out items with 0 (default) item ID.
+    let items: Vec<Item> = packet
+        .items
+        .into_iter()
+        .filter(|item| item.item_id != 0 && item.guid != 0)
+        .collect();
+
+    // Don't return empty item lists.
+    if items.is_empty() {
+        return None;
+    }
+
+    Some(items)
 }
 
-pub fn matches_avatars_all_data_notify(data: &Vec<u8>) -> Option<Vec<AvatarInfo>> {
-    Some(AvatarDataNotify::parse_from_bytes(data).ok()?.avatar_list)
+pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
+    let packet = AvatarDataNotify::parse_from_bytes(data).ok()?;
+    let avatar_list: Vec<AvatarInfo> = packet
+        .avatar_list
+        .into_iter()
+        .filter(|avatar| avatar.avatar_id != 0 && avatar.guid != 0)
+        .collect();
+
+    if avatar_list.is_empty() {
+        return None;
+    }
+
+    Some(avatar_list)
 }
