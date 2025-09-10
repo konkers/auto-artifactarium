@@ -57,7 +57,7 @@ use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
 use crate::gen::protos::PacketHead;
 use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
-use crate::unk_util::{
+pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
     matches_get_player_token_rsp, matches_items_all_data_notify,
 };
