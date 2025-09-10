@@ -93,7 +93,7 @@ message Item {
 }
 
 message PacketWithItems {
-	repeated Item items = 10;
+	repeated Item items = 5;
 }
 
 message PropValue {
@@ -154,9 +154,9 @@ message AvatarInfo {
     // AvatarExcelInfo excel_info = 26;
     uint32 anim_hash = 27;
     // JNHGJAIIMGJ PINDEGAFOAE = 28;
-    uint32 ABLFJPMKKDA = 29;
-    uint32 GCHGLANNHMC = 30;
-    uint32 KCINBOMOIGL = 31;
+    //uint32 ABLFJPMKKDA = 29;
+    //uint32 GCHGLANNHMC = 30;
+    //uint32 KCINBOMOIGL = 31;
 }
 
 
@@ -166,6 +166,6 @@ message AvatarTeam {
 }
 
 message AvatarDataNotify {
-    repeated AvatarInfo avatar_list = 13;
-    map<uint32, AvatarTeam> avatar_team_map = 14;
+    repeated AvatarInfo avatar_list = 5;
+    //map<uint32, AvatarTeam> avatar_team_map = 14;
 }
