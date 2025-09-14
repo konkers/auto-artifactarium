@@ -61,6 +61,7 @@ message Reliquary {
     uint32 main_prop_id = 4;
     repeated uint32 append_prop_id_list = 5;
     bool starred = 6;
+    repeated uint32 elixer_choices = 7;
     repeated uint32 unactivated_prop_id_list = 8;
 }
 
