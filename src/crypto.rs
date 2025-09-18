@@ -75,7 +75,7 @@ pub fn guess(seed: i64, server_seed: u64, depth: i32, data: Vec<u8>) -> Option<V
     None
 }
 
-pub fn bruteforce(sent_time: u64, server_seed: u64, data: Vec<u8>) -> Option<Vec<u8>> {
+pub fn bruteforce(sent_time: u64, server_seed: u64, data: Vec<u8>) -> Option<(u64, Vec<u8>)> {
     debug!("Running bruteforce loop.");
     // Generate new seeds.
     for i in 0..3000i64 {
@@ -83,7 +83,7 @@ pub fn bruteforce(sent_time: u64, server_seed: u64, data: Vec<u8>) -> Option<Vec
         let time = sent_time as i64 + offset; // This will act as the seed.
 
         if let Some(key) = guess(time, server_seed, 5, data.clone()) {
-            return Some(key);
+            return Some((time as u64, key));
         }
     }
     warn!("Unable to find the encryption key seed.");

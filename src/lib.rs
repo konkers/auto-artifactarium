@@ -184,6 +184,7 @@ pub enum Key {
 pub struct GameSniffer {
     sent_kcp: Option<KcpSniffer>,
     recv_kcp: Option<KcpSniffer>,
+    client_seed: Option<u64>,
     key: Option<Key>,
     initial_keys: HashMap<u16, Vec<u8>>,
     rsa_keys: Vec<RsaPrivateKey>,
@@ -296,14 +297,14 @@ impl GameSniffer {
                     self.key.as_ref().unwrap()
                 } else {
                     let mut discovered_key: Option<&Key> = None;
+                    let client_seed = self.client_seed.unwrap_or(self.sent_time.unwrap());
                     for &seed in &self.possible_seeds {
-                        let key = bruteforce(self.sent_time.unwrap(), seed, data.clone());
-                        match key {
-                            Some(key) => {
-                                self.key = Some(Key::Session(key));
-                                discovered_key = self.key.as_ref()
-                            }
-                            None => (),
+                        if let Some((client_seed, key)) =
+                            bruteforce(client_seed, seed, data.clone())
+                        {
+                            self.client_seed = Some(client_seed);
+                            self.key = Some(Key::Session(key));
+                            discovered_key = self.key.as_ref()
                         }
                     }
                     match discovered_key {
