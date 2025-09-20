@@ -297,16 +297,30 @@ impl GameSniffer {
                     self.key.as_ref().unwrap()
                 } else {
                     let mut discovered_key: Option<&Key> = None;
-                    let client_seed = self.client_seed.unwrap_or(self.sent_time.unwrap());
                     for &seed in &self.possible_seeds {
-                        if let Some((client_seed, key)) =
-                            bruteforce(client_seed, seed, data.clone())
+                        // First try with a retained client seed.
+                        if let Some(client_seed) = self.client_seed
+                            && let Some((client_seed, key)) =
+                                bruteforce(client_seed, seed, data.clone())
                         {
                             self.client_seed = Some(client_seed);
                             self.key = Some(Key::Session(key));
-                            discovered_key = self.key.as_ref()
+                            discovered_key = self.key.as_ref();
+                            break;
+                        }
+
+                        // If that fails, try with a client seed generated from the packet's
+                        // `sent_time`
+                        if let Some((client_seed, key)) =
+                            bruteforce(self.sent_time.unwrap(), seed, data.clone())
+                        {
+                            self.client_seed = Some(client_seed);
+                            self.key = Some(Key::Session(key));
+                            discovered_key = self.key.as_ref();
+                            break;
                         }
                     }
+
                     match discovered_key {
                         Some(key) => key,
                         None => {
