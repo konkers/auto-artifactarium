@@ -46,22 +46,22 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;
 
-use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use rsa::{pkcs1::DecodeRsaPrivateKey, RsaPrivateKey};
+use base64::prelude::BASE64_STANDARD;
+use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey};
 use tracing::{error, info, info_span, instrument, trace, warn};
 
 use crate::connection::parse_connection_packet;
 use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
 // use crate::gen::protos::GetPlayerTokenRsp;
-use crate::gen::protos::PacketHead;
+use crate::Key::Dispatch;
+use crate::r#gen::protos::PacketHead;
 use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
 pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
     matches_get_player_token_rsp, matches_items_all_data_notify,
 };
-use crate::Key::Dispatch;
 
 fn bytes_as_hex(bytes: &[u8]) -> String {
     bytes.iter().fold(String::new(), |mut output, b| {
@@ -71,7 +71,7 @@ fn bytes_as_hex(bytes: &[u8]) -> String {
 }
 
 // pub mod command_id;
-pub mod gen;
+pub mod r#gen;
 
 mod connection;
 mod crypto;
@@ -373,10 +373,10 @@ pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achi
     return matches_achievement_all_data_notify(game_command.proto_data.clone());
 }
 
-pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::Item>> {
+pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
     return matches_items_all_data_notify(&game_command.proto_data);
 }
 
-pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<gen::protos::AvatarInfo>> {
+pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
     return matches_avatars_all_data_notify(&game_command.proto_data);
 }

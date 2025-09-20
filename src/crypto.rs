@@ -37,13 +37,13 @@ pub fn lookup_initial_key(initial_keys: &HashMap<u16, Vec<u8>>, bytes: &[u8]) ->
 pub fn new_key_from_seed(seed: u64) -> Vec<u8> {
     // mersenne twister generator
     let mut first = Mt64::new(seed);
-    let mut gen = Mt64::new(first.next_u64());
+    let mut generator = Mt64::new(first.next_u64());
 
-    let _ = gen.next_u64(); // skip first number
+    let _ = generator.next_u64(); // skip first number
 
     let mut key = Vec::with_capacity(512);
     for _ in 0..512 {
-        for b in gen.next_u64().to_be_bytes() {
+        for b in generator.next_u64().to_be_bytes() {
             key.push(b);
         }
     }
