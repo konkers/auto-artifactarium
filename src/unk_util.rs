@@ -186,8 +186,8 @@ pub fn matches_items_all_data_notify(data: &[u8]) -> Option<Vec<Item>> {
         .filter(|item| item.item_id != 0 && item.guid != 0)
         .collect();
 
-    // Don't return empty item lists.
-    if items.is_empty() {
+    // Differentiate items packets from other that look alike.
+    if items.len() < 10 {
         return None;
     }
 
