@@ -95,6 +95,12 @@ pub enum ConnectionPacket {
     SegmentData(PacketDirection, Vec<u8>),
 }
 
+#[repr(u16)]
+enum CommandId {
+    AvatarDataNotify = 2282,
+    PlayerStoreNotify = 25558,
+}
+
 /// Game command header.
 ///
 /// Contains the type of the command in `command_id`
@@ -156,6 +162,14 @@ impl GameCommand {
 
     pub fn parse_proto<T: protobuf::Message>(&self) -> protobuf::Result<T> {
         T::parse_from_bytes(&self.proto_data)
+    }
+
+    pub fn is_avatar_data_notify(&self) -> bool {
+        self.command_id == CommandId::AvatarDataNotify as u16
+    }
+
+    pub fn is_player_store_notify(&self) -> bool {
+        self.command_id == CommandId::PlayerStoreNotify as u16
     }
 }
 
@@ -388,9 +402,17 @@ pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achi
 }
 
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
+    if !game_command.is_player_store_notify() {
+        return None;
+    }
+
     return matches_items_all_data_notify(&game_command.proto_data);
 }
 
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
+    if !game_command.is_avatar_data_notify() {
+        return None;
+    }
+
     return matches_avatars_all_data_notify(&game_command.proto_data);
 }
