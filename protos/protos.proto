@@ -96,7 +96,7 @@ message Item {
 }
 
 message PacketWithItems {
-	repeated Item items = 1;
+	repeated Item items = 10;
 }
 
 message PropValue {
@@ -169,6 +169,6 @@ message AvatarTeam {
 }
 
 message AvatarDataNotify {
-    repeated AvatarInfo avatar_list = 10;
+    repeated AvatarInfo avatar_list = 15;
     //map<uint32, AvatarTeam> avatar_team_map = 14;
 }
