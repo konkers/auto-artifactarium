@@ -97,8 +97,8 @@ pub enum ConnectionPacket {
 
 #[repr(u16)]
 enum CommandId {
-    AvatarDataNotify = 1224,
-    PlayerStoreNotify = 6577,
+    AvatarDataNotify = 26997,
+    PlayerStoreNotify = 24104,
 }
 
 /// Game command header.
