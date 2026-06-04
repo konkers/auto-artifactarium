@@ -401,18 +401,12 @@ pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achi
     return matches_achievement_all_data_notify(game_command.proto_data.clone());
 }
 
+/// Heuristic item packet matching — does not depend on command_id.
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
-    if !game_command.is_player_store_notify() {
-        return None;
-    }
-
     return matches_items_all_data_notify(&game_command.proto_data);
 }
 
+/// Heuristic avatar packet matching — does not depend on command_id.
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
-    if !game_command.is_avatar_data_notify() {
-        return None;
-    }
-
     return matches_avatars_all_data_notify(&game_command.proto_data);
 }
