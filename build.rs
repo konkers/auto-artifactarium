@@ -8,7 +8,7 @@ use std::fs;
 /// A single source file makes `protobuf_codegen` emit its content in one
 /// `protos` module, so existing `crate::gen::protos::*` references keep working.
 fn main() {
-    let proto_dir = "protos_experiment";
+    let proto_dir = "protos_src";
     let out_proto = "protos/protos.proto";
     // - cmd_gcg_common.proto: superseded by V70's cmd_gcg.proto (dup types)
     // - extra.proto: server-infrastructure messages (PlayerPacketNotify etc.)
