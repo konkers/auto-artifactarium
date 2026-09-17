@@ -77,6 +77,7 @@ mod connection;
 mod crypto;
 mod cs_rand;
 mod kcp;
+mod proto_json;
 mod unk_util;
 
 const PORTS: [u16; 2] = [22101, 22102];
@@ -123,6 +124,8 @@ pub struct GameCommand {
     #[allow(unused)]
     pub data_len: u32,
     pub proto_data: Vec<u8>,
+    /// Whether this command was sent by the client or received from the server.
+    pub direction: PacketDirection,
 }
 
 impl GameCommand {
@@ -130,7 +133,7 @@ impl GameCommand {
     const TAIL_LEN: usize = 2;
 
     #[instrument(skip(bytes), fields(len = bytes.len()))]
-    pub fn try_new(bytes: Vec<u8>) -> Option<Self> {
+    pub fn try_new(bytes: Vec<u8>, direction: PacketDirection) -> Option<Self> {
         let header_overhead = Self::HEADER_LEN + Self::TAIL_LEN;
         if bytes.len() < header_overhead {
             warn!(len = bytes.len(), "game command header incomplete");
@@ -157,7 +160,16 @@ impl GameCommand {
             header_len,
             data_len,
             proto_data: data,
+            direction,
         })
+    }
+
+    /// Human-readable packet direction for JSON output: `"sent"` or `"received"`.
+    pub fn direction_str(&self) -> &'static str {
+        match self.direction {
+            PacketDirection::Sent => "sent",
+            PacketDirection::Received => "received",
+        }
     }
 
     pub fn parse_proto<T: protobuf::Message>(&self) -> protobuf::Result<T> {
@@ -170,6 +182,19 @@ impl GameCommand {
 
     pub fn is_player_store_notify(&self) -> bool {
         self.command_id == CommandId::PlayerStoreNotify as u16
+    }
+
+    /// Serialize this command to a JSON object for UI display:
+    /// `{cmd_id, name, direction, header_len, size, data}` where `data` is the
+    /// proto body parsed via reflection. Returns `None` for command ids whose
+    /// body message type is unknown.
+    pub fn to_json(&self) -> Option<serde_json::Value> {
+        proto_json::command_to_json(self)
+    }
+
+    /// Serialize a lightweight summary (no body values) for list display.
+    pub fn summary_json(&self) -> serde_json::Value {
+        proto_json::command_summary_json(self)
     }
 }
 
@@ -274,7 +299,7 @@ impl GameSniffer {
             let commands = kcp
                 .receive_segments(kcp_seg)
                 .into_iter()
-                .filter_map(|data| self.receive_command(data))
+                .filter_map(|data| self.receive_command(direction, data))
                 .collect();
 
             return Some(commands);
@@ -284,7 +309,7 @@ impl GameSniffer {
     }
 
     #[instrument(skip_all, fields(len = data.len()))]
-    fn receive_command(&mut self, mut data: Vec<u8>) -> Option<GameCommand> {
+    fn receive_command(&mut self, direction: PacketDirection, mut data: Vec<u8>) -> Option<GameCommand> {
         let key_r = match &self.key {
             None => {
                 let key = lookup_initial_key(&self.initial_keys, &data);
@@ -366,7 +391,7 @@ impl GameSniffer {
 
         decrypt_command(key, &mut data);
 
-        let command = GameCommand::try_new(data)?;
+        let command = GameCommand::try_new(data, direction)?;
 
         let span = info_span!("command", ?command);
         let _enter = span.enter();
