@@ -112,10 +112,14 @@ enum CommandId {
 /// | - | - | - |
 /// |   0..2      |  `u16`  |  Header (magic constant) |
 /// |   2..4      |  `u16`  |  command_id |
-/// |   4..6      |  `u16`  |  header_len (unsure) |
-/// |   6..10     |  `u32`  |  data_len |
-/// |  10..10+data_len |  variable  |  proto_data |
-/// | data_len..data_len+2  |  `u16`  |  Tail (magic constant) |
+/// |   4..6      |  `u16`  |  header_len — length of the extended header |
+/// |   6..10     |  `u32`  |  data_len — length of `proto_data` |
+/// | 10..10+header_len |  variable  |  extended header (protobuf-encoded; carries a `unix_time` field) |
+/// | 10+header_len..10+header_len+data_len |  variable  |  proto_data |
+/// |  len-2..len  |  `u16`  |  Tail (magic constant) |
+///
+/// `header_len` is zero for most commands, in which case the extended header is
+/// absent and `proto_data` starts directly at byte 10.
 #[derive(Clone)]
 pub struct GameCommand {
     pub command_id: u16,
@@ -154,12 +158,23 @@ impl GameCommand {
         let header_len = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
         let data_len = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
 
-        let data = bytes[10..10 + data_len as usize + header_len as usize].to_vec();
+        // The extended header sits between the fixed header and the protobuf
+        // body, so the body starts at 10 + header_len.
+        let body_start = Self::HEADER_LEN + header_len as usize;
+        let body_end = body_start + data_len as usize;
+        let Some(body) = bytes.get(body_start..body_end) else {
+            warn!(
+                len = bytes.len(),
+                header_len, data_len, "game command body exceeds buffer"
+            );
+            return None;
+        };
+
         Some(GameCommand {
             command_id,
             header_len,
             data_len,
-            proto_data: data,
+            proto_data: body.to_vec(),
             direction,
         })
     }
@@ -434,4 +449,42 @@ pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::prot
 /// Heuristic avatar packet matching — does not depend on command_id.
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
     return matches_avatars_all_data_notify(&game_command.proto_data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(header_len: u16, ext: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x45, 0x67, 0x19, 0x81];
+        out.extend_from_slice(&header_len.to_be_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(ext);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0x89, 0xAB]);
+        out
+    }
+
+    #[test]
+    fn proto_data_skips_extended_header() {
+        let ext = [0x18, 0x57, 0x30, 0xd0, 0xc5, 0x9d, 0x97, 0x8b, 0x34];
+        let body = [0x12, 0x02, 0x01, 0x02, 0x60, 0x03];
+        let cmd = GameCommand::try_new(frame(9, &ext, &body), PacketDirection::Received).unwrap();
+        assert_eq!(cmd.command_id, 6529);
+        assert_eq!(cmd.proto_data, body);
+    }
+
+    #[test]
+    fn proto_data_starts_at_10_without_extended_header() {
+        let body = [0x08, 0x01, 0x12, 0x00];
+        let cmd = GameCommand::try_new(frame(0, &[], &body), PacketDirection::Sent).unwrap();
+        assert_eq!(cmd.proto_data, body);
+    }
+
+    #[test]
+    fn rejects_frame_whose_body_exceeds_buffer() {
+        let mut buf = frame(0, &[], &[0x08, 0x01]);
+        buf[6..10].copy_from_slice(&9999u32.to_be_bytes());
+        assert!(GameCommand::try_new(buf, PacketDirection::Sent).is_none());
+    }
 }
