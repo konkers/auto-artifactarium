@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs;
 
 /// Merge every Starlight proto (minus imports, which become redundant once all
@@ -81,16 +82,153 @@ fn main() {
     let map_path = std::path::Path::new(&std::env::var("OUT_DIR").unwrap()).join("cmd_id_map.rs");
     fs::write(&map_path, map).unwrap();
 
+    // Parse the merged schema once: the full FileDescriptorSet is embedded as
+    // data (reflection-based JSON builds its dynamic FileDescriptor from it at
+    // runtime), and the typed closure of a handful of messages gets Rust
+    // codegen. This keeps 27MB of generated code out of the crate.
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let parsed = protobuf_parse::Parser::new()
+        .pure()
+        .include("protos")
+        .input(out_proto.clone())
+        .parse_and_typecheck()
+        .expect("typecheck merged protos.proto");
+    let mut fdset = protobuf::descriptor::FileDescriptorSet::new();
+    fdset.file = parsed.file_descriptors;
+
+    // Typed subset: only the messages whose fields are accessed as concrete
+    // Rust types (heuristic matchers, PacketHead probing, tests). Everything
+    // else is reached through the dynamic descriptor.
+    const TYPED_ROOTS: &[&str] = &[
+        "Unk",
+        "PacketHead",
+        "Item",
+        "AvatarInfo",
+        "AvatarDataNotify",
+        "AvatarTeam",
+    ];
+    let needed = typed_closure(&fdset, TYPED_ROOTS);
+    // The extracted blocks carry no file header; the parser needs the syntax
+    // declaration to treat unlabelled scalar fields as proto3.
+    let subset = format!("syntax = \"proto3\";\n\n{}", extract_blocks(&final_proto, &needed));
+
+    let typed_dir = std::path::Path::new(&out_dir).join("typed_include");
+    fs::create_dir_all(&typed_dir).unwrap();
+    let typed_proto = typed_dir.join("protos.proto");
+    fs::write(&typed_proto, subset).unwrap();
+
     protobuf_codegen::Codegen::new()
         .pure()
-        .cargo_out_dir("protos")
-        .include("protos")
-        .input(out_proto)
+        .include(&typed_dir)
+        .input(&typed_proto)
+        .cargo_out_dir("typed_out")
         .run_from_script();
+
+    let fdset_bin = protobuf::Message::write_to_bytes(&fdset)
+        .expect("serialize FileDescriptorSet");
+    fs::write(
+        std::path::Path::new(&out_dir).join("full_fdset.bin"),
+        fdset_bin,
+    )
+    .unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=protos_experiment/");
     println!("cargo:rerun-if-changed=protos/protos.proto");
+}
+
+/// Transitive closure of message/enum types reachable from `roots`, keyed by
+/// top-level (unqualified) type name.
+fn typed_closure(
+    fdset: &protobuf::descriptor::FileDescriptorSet,
+    roots: &[&str],
+) -> BTreeSet<String> {
+    let mut by_name: HashMap<String, &protobuf::descriptor::DescriptorProto> = HashMap::new();
+    let mut enum_names: BTreeSet<String> = BTreeSet::new();
+    for f in &fdset.file {
+        for m in &f.message_type {
+            by_name.insert(m.name().to_string(), m);
+        }
+        for e in &f.enum_type {
+            enum_names.insert(e.name().to_string());
+        }
+    }
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = roots.iter().map(|s| s.to_string()).collect();
+    while let Some(name) = queue.pop_front() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(msg) = by_name.get(&name) else { continue };
+        let msg = *msg;
+        collect_field_types(msg, &by_name, &enum_names, &mut queue);
+    }
+    seen.into_iter().collect()
+}
+
+/// Walk a message's own and nested fields (map entries keep the value type in
+/// a synthetic nested entry message, so recursion is required) and queue every
+/// referenced top-level type.
+fn collect_field_types(
+    msg: &protobuf::descriptor::DescriptorProto,
+    by_name: &HashMap<String, &protobuf::descriptor::DescriptorProto>,
+    enum_names: &std::collections::BTreeSet<String>,
+    queue: &mut VecDeque<String>,
+) {
+    for field in &msg.field {
+        let tn = field.type_name();
+        if tn.is_empty() {
+            continue;
+        }
+        // Type names are ".TopLevel.Nested"; we copy whole top-level blocks,
+        // so only the first segment matters.
+        let top = tn.trim_start_matches('.').split('.').next().unwrap();
+        if by_name.contains_key(top) || enum_names.contains(top) {
+            queue.push_back(top.to_string());
+        }
+    }
+    for nested in &msg.nested_type {
+        collect_field_types(nested, by_name, enum_names, queue);
+    }
+}
+/// Extract the top-level `message X { ... }` / `enum X { ... }` blocks whose
+/// names appear in `needed`, preserving the original source text.
+fn extract_blocks(src: &str, needed: &std::collections::BTreeSet<String>) -> String {
+    let mut wanted: std::collections::BTreeSet<String> = needed.clone();
+    let mut out = String::new();
+    let lines: Vec<&str> = src.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let t = line.trim();
+        let name = t
+            .strip_prefix("message ")
+            .or_else(|| t.strip_prefix("enum "))
+            .and_then(|rest| rest.split('{').next())
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            if wanted.remove(n.as_str()) {
+                // Copy until the matching closing brace at depth 0.
+                let mut depth = 0i32;
+                while i < lines.len() {
+                    let l = lines[i];
+                    out.push_str(l);
+                    out.push('\n');
+                    depth += l.matches('{').count() as i32;
+                    depth -= l.matches('}').count() as i32;
+                    i += 1;
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+                out.push('\n');
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn strip_mask(src: &str) -> String {
