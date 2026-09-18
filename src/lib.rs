@@ -127,6 +127,8 @@ pub struct GameCommand {
     pub header_len: u16,
     #[allow(unused)]
     pub data_len: u32,
+    /// Serialized `PacketHead` carried before the body when `header_len` > 0.
+    pub ext_header: Vec<u8>,
     pub proto_data: Vec<u8>,
     /// Whether this command was sent by the client or received from the server.
     pub direction: PacketDirection,
@@ -158,11 +160,14 @@ impl GameCommand {
         let header_len = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
         let data_len = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
 
-        // The extended header sits between the fixed header and the protobuf
-        // body, so the body starts at 10 + header_len.
+        // The extended header (a serialized `PacketHead`) sits between the
+        // fixed header and the protobuf body.
         let body_start = Self::HEADER_LEN + header_len as usize;
         let body_end = body_start + data_len as usize;
-        let Some(body) = bytes.get(body_start..body_end) else {
+        let (Some(ext), Some(body)) = (
+            bytes.get(Self::HEADER_LEN..body_start),
+            bytes.get(body_start..body_end),
+        ) else {
             warn!(
                 len = bytes.len(),
                 header_len, data_len, "game command body exceeds buffer"
@@ -174,6 +179,7 @@ impl GameCommand {
             command_id,
             header_len,
             data_len,
+            ext_header: ext.to_vec(),
             proto_data: body.to_vec(),
             direction,
         })
@@ -189,6 +195,17 @@ impl GameCommand {
 
     pub fn parse_proto<T: protobuf::Message>(&self) -> protobuf::Result<T> {
         T::parse_from_bytes(&self.proto_data)
+    }
+
+    /// Parse the extended header as `PacketHead`. Falls back to the body for
+    /// commands that carry no extended header.
+    pub fn parse_head(&self) -> protobuf::Result<PacketHead> {
+        let bytes = if self.ext_header.is_empty() {
+            &self.proto_data
+        } else {
+            &self.ext_header
+        };
+        protobuf::Message::parse_from_bytes(bytes)
     }
 
     pub fn is_avatar_data_notify(&self) -> bool {
@@ -427,7 +444,7 @@ impl GameSniffer {
             {
                 self.possible_seeds = possible_seeds;
                 info!(?self.possible_seeds, "setting new possible session seeds");
-                let header_command = command.parse_proto::<PacketHead>().unwrap();
+                let header_command = command.parse_head().unwrap();
                 self.sent_time = Some(header_command.sent_ms);
                 info!(?self.sent_time, "setting new send time");
             }
@@ -471,6 +488,7 @@ mod tests {
         let body = [0x12, 0x02, 0x01, 0x02, 0x60, 0x03];
         let cmd = GameCommand::try_new(frame(9, &ext, &body), PacketDirection::Received).unwrap();
         assert_eq!(cmd.command_id, 6529);
+        assert_eq!(cmd.ext_header, ext);
         assert_eq!(cmd.proto_data, body);
     }
 

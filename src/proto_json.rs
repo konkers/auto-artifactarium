@@ -222,6 +222,7 @@ mod tests {
             header_len: 0,
             data_len: 0,
             proto_data: Vec::new(),
+            ext_header: Vec::new(),
             direction: PacketDirection::Received,
         };
         assert!(cmd.to_json().is_none());
@@ -234,6 +235,7 @@ mod tests {
             header_len: 0,
             data_len: 0,
             proto_data: Vec::new(),
+            ext_header: Vec::new(),
             direction: PacketDirection::Sent,
         };
         let s = crate::proto_json::command_summary_json(&unknown);
@@ -251,6 +253,7 @@ mod tests {
             header_len: 0,
             data_len: bytes.len() as u32,
             proto_data: bytes,
+            ext_header: Vec::new(),
             direction: PacketDirection::Sent,
         };
         let s = cmd.summary_json();
@@ -280,6 +283,7 @@ mod tests {
             header_len: 0,
             data_len: bytes.len() as u32,
             proto_data: bytes,
+            ext_header: Vec::new(),
             direction: PacketDirection::Sent,
         };
 
@@ -307,6 +311,7 @@ mod tests {
             header_len: 0,
             data_len: 5,
             proto_data: vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+            ext_header: Vec::new(),
             direction: PacketDirection::Received,
         };
         let json = cmd.to_json().expect("known command still returns an object");
