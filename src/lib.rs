@@ -52,7 +52,9 @@ use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey};
 use tracing::{error, info, info_span, instrument, trace, warn};
 
 use crate::connection::parse_connection_packet;
-use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
+use crate::crypto::{
+    KEY_LEN, bruteforce, decrypt_command, key_from_known_body, lookup_initial_key,
+};
 // use crate::gen::protos::GetPlayerTokenRsp;
 use crate::Key::Dispatch;
 use crate::r#gen::protos::PacketHead;
@@ -68,6 +70,22 @@ fn bytes_as_hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{b:02x}");
         output
     })
+}
+
+/// Whether `data` is a plaintext game command frame: magic `45 67` and `89 AB`.
+fn looks_like_command(data: &[u8]) -> bool {
+    data.len() >= 4
+        && data[0] == 0x45
+        && data[1] == 0x67
+        && data[data.len() - 2] == 0x89
+        && data[data.len() - 1] == 0xAB
+}
+
+/// Whether `key` is the key that opens `data`.
+fn opens_command(key: &[u8], data: &[u8]) -> bool {
+    let mut test = data.to_vec();
+    decrypt_command(key, &mut test);
+    looks_like_command(&test)
 }
 
 // pub mod command_id;
@@ -261,6 +279,9 @@ pub struct GameSniffer {
     rsa_keys: Vec<RsaPrivateKey>,
     sent_time: Option<u64>,
     possible_seeds: Vec<u64>,
+    /// Command bodies recovered from earlier sessions, used for a
+    /// known-plaintext recovery of a session key we cannot derive from a seed.
+    known_bodies: Vec<Vec<u8>>,
 }
 
 impl GameSniffer {
@@ -283,6 +304,53 @@ impl GameSniffer {
     pub fn set_initial_keys(mut self, initial_keys: HashMap<u16, Vec<u8>>) -> Self {
         self.initial_keys = initial_keys;
         self
+    }
+
+    /// Teach the sniffer the body of a command that repeats verbatim across
+    /// client processes, so its key can be recovered from ciphertext alone. In
+    /// practice this is the anti-cheat Lua shell body: 167875 bytes, carrying the
+    /// 4096-byte session key 41 times over.
+    pub fn add_known_body(mut self, body: Vec<u8>) -> Self {
+        self.known_bodies.push(body);
+        self
+    }
+
+    /// The command bodies this sniffer can open a future session with: the ones
+    /// injected through [`add_known_body`](Self::add_known_body) plus the ones it
+    /// noted while decrypting. Persist these to carry them into the next process.
+    pub fn known_bodies(&self) -> &[Vec<u8>] {
+        &self.known_bodies
+    }
+
+    /// Keep a copy of a command body long enough to carry the whole session key,
+    /// so a later session we cannot seed can still be opened. See
+    /// `crypto::key_from_known_body`.
+    fn note_known_body(&mut self, body: &[u8]) {
+        const MIN_BODY_LEN: usize = 2 * KEY_LEN;
+        const MAX_SAMPLES: usize = 4;
+
+        if body.len() < MIN_BODY_LEN
+            || self.known_bodies.iter().any(|kept| kept.len() == body.len())
+        {
+            return;
+        }
+        // Prefer the longest bodies: each 4096 bytes is another copy of the key,
+        // so a region that does vary between sessions still leaves every byte a
+        // clear majority.
+        let shortest = self.known_bodies.iter().map(Vec::len).min().unwrap_or(0);
+        if self.known_bodies.len() == MAX_SAMPLES {
+            if body.len() <= shortest {
+                return;
+            }
+            let worst = self
+                .known_bodies
+                .iter()
+                .position(|kept| kept.len() == shortest)
+                .unwrap();
+            self.known_bodies.remove(worst);
+        }
+        info!(len = body.len(), "noting known command body");
+        self.known_bodies.push(body.to_vec());
     }
 
     #[instrument(skip_all, fields(len = bytes.len()))]
@@ -360,42 +428,16 @@ impl GameSniffer {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45
-                    && test[1] == 0x67
-                    && test[test.len() - 2] == 0x89
-                    && test[test.len() - 1] == 0xAB
-                {
+                if looks_like_command(&test) {
                     self.key.as_ref().unwrap()
                 } else {
-                    let mut discovered_key: Option<&Key> = None;
-                    for &seed in &self.possible_seeds {
-                        // First try with a retained client seed.
-                        if let Some(client_seed) = self.client_seed
-                            && let Some((client_seed, key)) =
-                                bruteforce(client_seed, seed, data.clone())
-                        {
-                            self.client_seed = Some(client_seed);
+                    match self.deduce_key(&data) {
+                        Some(key) => {
                             self.key = Some(Key::Session(key));
-                            discovered_key = self.key.as_ref();
-                            break;
+                            self.key.as_ref().unwrap()
                         }
-
-                        // If that fails, try with a client seed generated from the packet's
-                        // `sent_time`
-                        if let Some((client_seed, key)) =
-                            bruteforce(self.sent_time.unwrap(), seed, data.clone())
-                        {
-                            self.client_seed = Some(client_seed);
-                            self.key = Some(Key::Session(key));
-                            discovered_key = self.key.as_ref();
-                            break;
-                        }
-                    }
-
-                    match discovered_key {
-                        Some(key) => key,
                         None => {
-                            error!("Couldn't bruteforce from deduced keys");
+                            error!("Couldn't deduce the session key");
                             return None;
                         }
                     }
@@ -405,14 +447,25 @@ impl GameSniffer {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45 && test[1] == 0x67 {
-                    //|| test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB
+                if looks_like_command(&test) {
                     self.key.as_ref().unwrap()
                 } else {
+                    // The session key either stopped working because the client
+                    // re-authenticated, or was never right — the time search can
+                    // hit four magic bytes by chance. Try to deduce a key that
+                    // opens *this* packet before giving up on it.
                     warn!("Invalidated session key");
                     self.key = None;
-                    error!("Session key dead, relaunch game");
-                    return None;
+                    match self.deduce_key(&data) {
+                        Some(key) => {
+                            self.key = Some(Key::Session(key));
+                            self.key.as_ref().unwrap()
+                        }
+                        None => {
+                            error!("Session key dead, relaunch game");
+                            return None;
+                        }
+                    }
                 }
             }
         };
@@ -438,6 +491,10 @@ impl GameSniffer {
         //     return None;
         // }
 
+        if matches!(self.key, Some(Key::Session(_))) {
+            self.note_known_body(&command.proto_data);
+        }
+
         if let Some(Dispatch(_)) = self.key {
             if let Some(possible_seeds) =
                 matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone())
@@ -451,6 +508,40 @@ impl GameSniffer {
         }
 
         Some(command)
+    }
+
+    /// Recover the session key that opens `data`.
+    ///
+    /// The time-anchored bruteforce only works for a client process's *first*
+    /// login. Measured across a day of captures: a re-auth inside a long-running
+    /// client keeps the rand key it chose when the process started, and no
+    /// wall-clock time in the 26 hours before its handshake yielded the key. For
+    /// those sessions a known plaintext is the only way in, so try it first — it
+    /// is also orders of magnitude cheaper than searching.
+    #[instrument(skip_all, fields(len = data.len()))]
+    fn deduce_key(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        for body in &self.known_bodies {
+            if let Some(key) = key_from_known_body(body, data)
+                && opens_command(&key, data)
+            {
+                info!("recovered session key from a known command body");
+                return Some(key);
+            }
+        }
+
+        let seeds = self.possible_seeds.clone();
+        let anchors: Vec<u64> = self.client_seed.into_iter().chain(self.sent_time).collect();
+        let bruteforced = seeds.iter().find_map(|&server| {
+            anchors
+                .iter()
+                .find_map(|&anchor| bruteforce(anchor, server, data.to_vec()))
+        });
+
+        if let Some((time, key)) = bruteforced {
+            self.client_seed = Some(time);
+            return Some(key);
+        }
+        None
     }
 }
 

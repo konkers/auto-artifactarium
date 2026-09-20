@@ -10,48 +10,41 @@ use crate::r#gen::protos::AvatarInfo;
 use crate::r#gen::protos::Item;
 use crate::r#gen::protos::Unk;
 
+/// The server rand keys a `GetPlayerTokenRsp` carries.
+///
+/// The seed behind the session key travels as PKCS#1 v1.5 ciphertext under one
+/// of the server RSA keys, so any field that decrypts to exactly eight bytes is
+/// one. Field numbers are deliberately ignored: the client shuffles them every
+/// version, and a bogus candidate cannot survive a real RSA decryption anyway.
+///
+/// The client's own half in `GetPlayerTokenReq` is a 256-byte RSA-2048 blob too,
+/// but not under a key we hold — which is why the seed has to be recovered from
+/// time (see `crypto::bruteforce`) or from a known plaintext.
 pub fn matches_get_player_token_rsp(
     data: Vec<u8>,
     rsa_keys: Vec<RsaPrivateKey>,
 ) -> Option<Vec<u64>> {
-    let d_msg = Unk::parse_from_bytes(&data);
-    match d_msg {
-        Ok(d_msg) => {
-            let mut to_ret: Vec<u64> = vec![];
-            let unknown_fields = d_msg.unknown_fields();
-            for (field_number, field_data) in unknown_fields.iter() {
-                tracing::debug!("field: {}: {:?}", field_number, field_data);
-                let possible_encrypted = match field_data {
-                    LengthDelimited(encrypted_bytes) => {
-                        let encrypted = BASE64_STANDARD.decode(encrypted_bytes);
-                        match encrypted {
-                            Ok(encrypted) => Some(encrypted),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                let possible_seeds: Vec<u64> = match possible_encrypted {
-                    Some(possible_encrypted) => rsa_keys
-                        .iter()
-                        .filter_map(|key| key.decrypt(Pkcs1v15Encrypt, &possible_encrypted).ok())
-                        .collect::<Vec<Vec<u8>>>()
-                        .iter()
-                        .filter(|&seed| seed.len() == 8)
-                        .map(|seed| u64::from_be_bytes(seed.as_slice().try_into().unwrap()))
-                        .collect(),
-                    _ => vec![],
-                };
-                to_ret.extend(possible_seeds)
-            }
-            if to_ret.len() != 0 {
-                Some(to_ret)
-            } else {
-                None
+    let Ok(d_msg) = Unk::parse_from_bytes(&data) else {
+        return None;
+    };
+
+    let mut rand_keys = vec![];
+    for (field_number, field_data) in d_msg.unknown_fields().iter() {
+        tracing::debug!("field: {}: {:?}", field_number, field_data);
+        let encrypted = match field_data {
+            LengthDelimited(bytes) => BASE64_STANDARD.decode(bytes),
+            _ => continue,
+        };
+        let Ok(encrypted) = encrypted else { continue };
+        for key in &rsa_keys {
+            if let Ok(seed) = key.decrypt(Pkcs1v15Encrypt, &encrypted)
+                && seed.len() == 8
+            {
+                rand_keys.push(u64::from_be_bytes(seed.as_slice().try_into().unwrap()));
             }
         }
-        _ => None,
     }
+    (!rand_keys.is_empty()).then_some(rand_keys)
 }
 
 #[derive(Clone, Default)]
@@ -242,10 +235,7 @@ pub fn matches_items_all_data_notify(data: &[u8]) -> Option<Vec<Item>> {
         return None;
     }
 
-    tracing::debug!(
-        "Item packet matched ({} items)",
-        items.len(),
-    );
+    tracing::debug!("Item packet matched ({} items)", items.len(),);
     Some(items)
 }
 
@@ -269,7 +259,10 @@ pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
         return None;
     }
 
-    let has_skills = avatars.iter().filter(|a| !a.skill_level_map.is_empty()).count();
+    let has_skills = avatars
+        .iter()
+        .filter(|a| !a.skill_level_map.is_empty())
+        .count();
     if has_skills < MIN_AVATARS_WITH_SKILLS {
         tracing::debug!(
             "Avatar packet candidate rejected ({} avatars, only {} with skills)",
@@ -279,7 +272,10 @@ pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
         return None;
     }
 
-    let has_equip = avatars.iter().filter(|a| !a.equip_guid_list.is_empty()).count();
+    let has_equip = avatars
+        .iter()
+        .filter(|a| !a.equip_guid_list.is_empty())
+        .count();
     if has_equip < MIN_AVATARS_WITH_EQUIP {
         tracing::debug!(
             "Avatar packet candidate rejected ({} avatars, only {} with equip)",
@@ -289,9 +285,6 @@ pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
         return None;
     }
 
-    tracing::debug!(
-        "Avatar packet matched ({} avatars)",
-        avatars.len(),
-    );
+    tracing::debug!("Avatar packet matched ({} avatars)", avatars.len(),);
     Some(avatars)
 }
