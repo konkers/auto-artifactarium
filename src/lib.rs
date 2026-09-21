@@ -272,9 +272,27 @@ pub enum PacketDirection {
     Received,
 }
 
+/// Which key is decrypting the current stream, and where it came from.
+///
+/// The distinction matters to whoever is watching: a stream opened with the
+/// dispatch key only yields the handshake-era packets before everything goes
+/// quiet, and only the session-key origins say whether *this* client process
+/// could be opened at all.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum KeyOrigin {
+    /// The per-version dispatch key, looked up from the packet's own header.
+    Dispatch,
+    /// A session key recovered by XOR-voting a known command body against the
+    /// ciphertext. Works for a process whose handshake we never saw.
+    KnownBody,
+    /// A session key found by searching client-clock seeds around the handshake.
+    /// Only ever works for a process's first login. See [`Self::KnownBody`].
+    TimeSearch,
+}
+
 pub enum Key {
     Dispatch(Vec<u8>),
-    Session(Vec<u8>),
+    Session(Vec<u8>, KeyOrigin),
 }
 
 #[derive(Default)]
@@ -328,6 +346,20 @@ impl GameSniffer {
     /// noted while decrypting. Persist these to carry them into the next process.
     pub fn known_bodies(&self) -> &[Vec<u8>] {
         &self.known_bodies
+    }
+
+    /// How the key currently decrypting this stream was obtained, or `None` when
+    /// no key has been found yet.
+    ///
+    /// Report this alongside decoded packets: "no packets decoded" and "only the
+    /// handshake decoded" look identical to whoever is watching unless the origin
+    /// says which one happened.
+    pub fn key_origin(&self) -> Option<KeyOrigin> {
+        match &self.key {
+            Some(Key::Dispatch(_)) => Some(KeyOrigin::Dispatch),
+            Some(Key::Session(_, origin)) => Some(*origin),
+            None => None,
+        }
     }
 
     /// Keep a copy of a command body long enough to carry the whole session key,
@@ -440,8 +472,8 @@ impl GameSniffer {
                     self.key.as_ref().unwrap()
                 } else {
                     match self.deduce_key(&data) {
-                        Some(key) => {
-                            self.key = Some(Key::Session(key));
+                        Some((origin, key)) => {
+                            self.key = Some(Key::Session(key, origin));
                             self.key.as_ref().unwrap()
                         }
                         None => {
@@ -451,7 +483,7 @@ impl GameSniffer {
                     }
                 }
             }
-            Some(Key::Session(k)) => {
+            Some(Key::Session(k, _)) => {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
@@ -465,8 +497,8 @@ impl GameSniffer {
                     warn!("Invalidated session key");
                     self.key = None;
                     match self.deduce_key(&data) {
-                        Some(key) => {
-                            self.key = Some(Key::Session(key));
+                        Some((origin, key)) => {
+                            self.key = Some(Key::Session(key, origin));
                             self.key.as_ref().unwrap()
                         }
                         None => {
@@ -479,7 +511,7 @@ impl GameSniffer {
         };
 
         let key = match key_r {
-            Dispatch(k) | Key::Session(k) => k,
+            Dispatch(k) | Key::Session(k, _) => k,
         };
 
         decrypt_command(key, &mut data);
@@ -499,7 +531,7 @@ impl GameSniffer {
         //     return None;
         // }
 
-        if matches!(self.key, Some(Key::Session(_))) {
+        if matches!(self.key, Some(Key::Session(..))) {
             self.note_known_body(&command.proto_data);
         }
 
@@ -527,13 +559,13 @@ impl GameSniffer {
     /// those sessions a known plaintext is the only way in, so try it first — it
     /// is also orders of magnitude cheaper than searching.
     #[instrument(skip_all, fields(len = data.len()))]
-    fn deduce_key(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+    fn deduce_key(&mut self, data: &[u8]) -> Option<(KeyOrigin, Vec<u8>)> {
         for body in &self.known_bodies {
             if let Some(key) = key_from_known_body(body, data)
                 && opens_command(&key, data)
             {
                 info!("recovered session key from a known command body");
-                return Some(key);
+                return Some((KeyOrigin::KnownBody, key));
             }
         }
 
@@ -547,7 +579,7 @@ impl GameSniffer {
 
         if let Some((time, key)) = bruteforced {
             self.client_seed = Some(time);
-            return Some(key);
+            return Some((KeyOrigin::TimeSearch, key));
         }
         None
     }
