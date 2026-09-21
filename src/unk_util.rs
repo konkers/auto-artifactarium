@@ -6,54 +6,45 @@ use protobuf::Message;
 use protobuf::UnknownValueRef::*;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 
-use crate::r#gen::protos::AvatarDataNotify;
 use crate::r#gen::protos::AvatarInfo;
 use crate::r#gen::protos::Item;
-use crate::r#gen::protos::PacketWithItems;
 use crate::r#gen::protos::Unk;
 
+/// The server rand keys a `GetPlayerTokenRsp` carries.
+///
+/// The seed behind the session key travels as PKCS#1 v1.5 ciphertext under one
+/// of the server RSA keys, so any field that decrypts to exactly eight bytes is
+/// one. Field numbers are deliberately ignored: the client shuffles them every
+/// version, and a bogus candidate cannot survive a real RSA decryption anyway.
+///
+/// The client's own half in `GetPlayerTokenReq` is a 256-byte RSA-2048 blob too,
+/// but not under a key we hold — which is why the seed has to be recovered from
+/// time (see `crypto::bruteforce`) or from a known plaintext.
 pub fn matches_get_player_token_rsp(
     data: Vec<u8>,
     rsa_keys: Vec<RsaPrivateKey>,
 ) -> Option<Vec<u64>> {
-    let d_msg = Unk::parse_from_bytes(&data);
-    match d_msg {
-        Ok(d_msg) => {
-            let mut to_ret: Vec<u64> = vec![];
-            let unknown_fields = d_msg.unknown_fields();
-            for (field_number, field_data) in unknown_fields.iter() {
-                tracing::debug!("field: {}: {:?}", field_number, field_data);
-                let possible_encrypted = match field_data {
-                    LengthDelimited(encrypted_bytes) => {
-                        let encrypted = BASE64_STANDARD.decode(encrypted_bytes);
-                        match encrypted {
-                            Ok(encrypted) => Some(encrypted),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                let possible_seeds: Vec<u64> = match possible_encrypted {
-                    Some(possible_encrypted) => rsa_keys
-                        .iter()
-                        .filter_map(|key| key.decrypt(Pkcs1v15Encrypt, &possible_encrypted).ok())
-                        .collect::<Vec<Vec<u8>>>()
-                        .iter()
-                        .filter(|&seed| seed.len() == 8)
-                        .map(|seed| u64::from_be_bytes(seed.as_slice().try_into().unwrap()))
-                        .collect(),
-                    _ => vec![],
-                };
-                to_ret.extend(possible_seeds)
-            }
-            if to_ret.len() != 0 {
-                Some(to_ret)
-            } else {
-                None
+    let Ok(d_msg) = Unk::parse_from_bytes(&data) else {
+        return None;
+    };
+
+    let mut rand_keys = vec![];
+    for (field_number, field_data) in d_msg.unknown_fields().iter() {
+        tracing::debug!("field: {}: {:?}", field_number, field_data);
+        let encrypted = match field_data {
+            LengthDelimited(bytes) => BASE64_STANDARD.decode(bytes),
+            _ => continue,
+        };
+        let Ok(encrypted) = encrypted else { continue };
+        for key in &rsa_keys {
+            if let Ok(seed) = key.decrypt(Pkcs1v15Encrypt, &encrypted)
+                && seed.len() == 8
+            {
+                rand_keys.push(u64::from_be_bytes(seed.as_slice().try_into().unwrap()));
             }
         }
-        _ => None,
     }
+    (!rand_keys.is_empty()).then_some(rand_keys)
 }
 
 #[derive(Clone, Default)]
@@ -176,35 +167,124 @@ pub fn matches_achievement_all_data_notify(data: Vec<u8>) -> Option<Vec<Achievem
     }
 }
 
+// --- Heuristic thresholds for field-number-agnostic packet matching ---
+const MIN_ITEM_ENTRIES: usize = 10;
+const MIN_GEAR_COUNT: usize = 5;
+const MIN_AVATAR_ENTRIES: usize = 4;
+const MIN_AVATARS_WITH_PROPS: usize = 2;
+const MIN_AVATARS_WITH_SKILLS: usize = 2;
+const MIN_AVATARS_WITH_EQUIP: usize = 2;
+
+/// Extract the repeated field with the most entries that parse as `T` and pass
+/// the `filter`. Returns `(best_field_number, parsed_entries)`.
+///
+/// This is the core of field-number-agnostic packet matching: parse the outer
+/// message as `Unk` (generic protobuf), group all length-delimited values by
+/// field number, try parsing each group as `T`, and pick the field with the
+/// most valid results.
+fn find_best_field<T: Message>(
+    proto_data: &[u8],
+    min_entries: usize,
+    filter: impl Fn(&T) -> bool,
+) -> Option<(u32, Vec<T>)> {
+    let unk = Unk::parse_from_bytes(proto_data).ok()?;
+    let mut field_map: HashMap<u32, Vec<&[u8]>> = HashMap::new();
+    for (field_num, value) in unk.unknown_fields().iter() {
+        if let LengthDelimited(bytes) = value {
+            field_map.entry(field_num).or_default().push(bytes);
+        }
+    }
+    let mut best: Option<(u32, Vec<T>)> = None;
+    for (field_num, blobs) in &field_map {
+        if blobs.len() < min_entries {
+            continue;
+        }
+        let parsed: Vec<T> = blobs
+            .iter()
+            .filter_map(|b| T::parse_from_bytes(b).ok())
+            .filter(|v| filter(v))
+            .collect();
+        if parsed.len() >= min_entries
+            && best.as_ref().map_or(true, |(_, b)| parsed.len() > b.len())
+        {
+            best = Some((*field_num, parsed));
+        }
+    }
+    best
+}
+
+/// Field-number-agnostic item packet detection.
+///
+/// Survives both command ID rotation and outer field number changes.
 pub fn matches_items_all_data_notify(data: &[u8]) -> Option<Vec<Item>> {
-    let packet = PacketWithItems::parse_from_bytes(data).ok()?;
+    let (_field, items) = find_best_field::<Item>(data, MIN_ITEM_ENTRIES, |item| {
+        item.item_id != 0 && item.guid != 0
+    })?;
 
-    // Filter out items with 0 (default) item ID.
-    let items: Vec<Item> = packet
-        .items
-        .into_iter()
-        .filter(|item| item.item_id != 0 && item.guid != 0)
-        .collect();
+    let gear_count = items
+        .iter()
+        .filter(|i| i.has_equip() && (i.equip().has_weapon() || i.equip().has_reliquary()))
+        .count();
 
-    // Differentiate items packets from other that look alike.
-    if items.len() < 10 {
+    if gear_count < MIN_GEAR_COUNT {
+        tracing::debug!(
+            "Item packet candidate rejected ({} items, {} weapons/artifacts)",
+            items.len(),
+            gear_count,
+        );
         return None;
     }
 
+    tracing::debug!("Item packet matched ({} items)", items.len(),);
     Some(items)
 }
 
+/// Field-number-agnostic avatar packet detection.
+///
+/// Requires ≥4 avatars with non-empty `prop_map`, `skill_level_map`, and
+/// `equip_guid_list`. This filters out incremental packets (team changes,
+/// trial avatars) which lack skill/equip data.
 pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
-    let packet = AvatarDataNotify::parse_from_bytes(data).ok()?;
-    let avatar_list: Vec<AvatarInfo> = packet
-        .avatar_list
-        .into_iter()
-        .filter(|avatar| avatar.avatar_id != 0 && avatar.guid != 0)
-        .collect();
+    let (_field, avatars) = find_best_field::<AvatarInfo>(data, MIN_AVATAR_ENTRIES, |a| {
+        a.avatar_id != 0 && a.guid != 0
+    })?;
 
-    if avatar_list.is_empty() {
+    let has_props = avatars.iter().filter(|a| !a.prop_map.is_empty()).count();
+    if has_props < MIN_AVATARS_WITH_PROPS {
+        tracing::debug!(
+            "Avatar packet candidate rejected ({} avatars, only {} with props)",
+            avatars.len(),
+            has_props,
+        );
         return None;
     }
 
-    Some(avatar_list)
+    let has_skills = avatars
+        .iter()
+        .filter(|a| !a.skill_level_map.is_empty())
+        .count();
+    if has_skills < MIN_AVATARS_WITH_SKILLS {
+        tracing::debug!(
+            "Avatar packet candidate rejected ({} avatars, only {} with skills)",
+            avatars.len(),
+            has_skills,
+        );
+        return None;
+    }
+
+    let has_equip = avatars
+        .iter()
+        .filter(|a| !a.equip_guid_list.is_empty())
+        .count();
+    if has_equip < MIN_AVATARS_WITH_EQUIP {
+        tracing::debug!(
+            "Avatar packet candidate rejected ({} avatars, only {} with equip)",
+            avatars.len(),
+            has_equip,
+        );
+        return None;
+    }
+
+    tracing::debug!("Avatar packet matched ({} avatars)", avatars.len(),);
+    Some(avatars)
 }

@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+option csharp_namespace = "Starlight.Protocol";
+
+// This is a metadata file used by the compiler to prevent implicit inference.
+package v70;

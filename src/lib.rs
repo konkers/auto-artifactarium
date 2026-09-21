@@ -52,7 +52,9 @@ use rsa::{RsaPrivateKey, pkcs1::DecodeRsaPrivateKey};
 use tracing::{error, info, info_span, instrument, trace, warn};
 
 use crate::connection::parse_connection_packet;
-use crate::crypto::{bruteforce, decrypt_command, lookup_initial_key};
+use crate::crypto::{
+    KEY_LEN, bruteforce, decrypt_command, key_from_known_body, lookup_initial_key,
+};
 // use crate::gen::protos::GetPlayerTokenRsp;
 use crate::Key::Dispatch;
 use crate::r#gen::protos::PacketHead;
@@ -70,6 +72,22 @@ fn bytes_as_hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Whether `data` is a plaintext game command frame: magic `45 67` and `89 AB`.
+fn looks_like_command(data: &[u8]) -> bool {
+    data.len() >= 4
+        && data[0] == 0x45
+        && data[1] == 0x67
+        && data[data.len() - 2] == 0x89
+        && data[data.len() - 1] == 0xAB
+}
+
+/// Whether `key` is the key that opens `data`.
+fn opens_command(key: &[u8], data: &[u8]) -> bool {
+    let mut test = data.to_vec();
+    decrypt_command(key, &mut test);
+    looks_like_command(&test)
+}
+
 // pub mod command_id;
 pub mod r#gen;
 
@@ -77,6 +95,8 @@ mod connection;
 mod crypto;
 mod cs_rand;
 mod kcp;
+mod proto_json;
+mod raw_proto;
 mod unk_util;
 
 const PORTS: [u16; 2] = [22101, 22102];
@@ -97,8 +117,8 @@ pub enum ConnectionPacket {
 
 #[repr(u16)]
 enum CommandId {
-    AvatarDataNotify = 2282,
-    PlayerStoreNotify = 25558,
+    AvatarDataNotify = 6586,
+    PlayerStoreNotify = 8132,
 }
 
 /// Game command header.
@@ -111,10 +131,14 @@ enum CommandId {
 /// | - | - | - |
 /// |   0..2      |  `u16`  |  Header (magic constant) |
 /// |   2..4      |  `u16`  |  command_id |
-/// |   4..6      |  `u16`  |  header_len (unsure) |
-/// |   6..10     |  `u32`  |  data_len |
-/// |  10..10+data_len |  variable  |  proto_data |
-/// | data_len..data_len+2  |  `u16`  |  Tail (magic constant) |
+/// |   4..6      |  `u16`  |  header_len — length of the extended header |
+/// |   6..10     |  `u32`  |  data_len — length of `proto_data` |
+/// | 10..10+header_len |  variable  |  extended header (protobuf-encoded; carries a `unix_time` field) |
+/// | 10+header_len..10+header_len+data_len |  variable  |  proto_data |
+/// |  len-2..len  |  `u16`  |  Tail (magic constant) |
+///
+/// `header_len` is zero for most commands, in which case the extended header is
+/// absent and `proto_data` starts directly at byte 10.
 #[derive(Clone)]
 pub struct GameCommand {
     pub command_id: u16,
@@ -122,7 +146,11 @@ pub struct GameCommand {
     pub header_len: u16,
     #[allow(unused)]
     pub data_len: u32,
+    /// Serialized `PacketHead` carried before the body when `header_len` > 0.
+    pub ext_header: Vec<u8>,
     pub proto_data: Vec<u8>,
+    /// Whether this command was sent by the client or received from the server.
+    pub direction: PacketDirection,
 }
 
 impl GameCommand {
@@ -130,7 +158,7 @@ impl GameCommand {
     const TAIL_LEN: usize = 2;
 
     #[instrument(skip(bytes), fields(len = bytes.len()))]
-    pub fn try_new(bytes: Vec<u8>) -> Option<Self> {
+    pub fn try_new(bytes: Vec<u8>, direction: PacketDirection) -> Option<Self> {
         let header_overhead = Self::HEADER_LEN + Self::TAIL_LEN;
         if bytes.len() < header_overhead {
             warn!(len = bytes.len(), "game command header incomplete");
@@ -151,17 +179,52 @@ impl GameCommand {
         let header_len = u16::from_be_bytes(bytes[4..6].try_into().unwrap());
         let data_len = u32::from_be_bytes(bytes[6..10].try_into().unwrap());
 
-        let data = bytes[10..10 + data_len as usize + header_len as usize].to_vec();
+        // The extended header (a serialized `PacketHead`) sits between the
+        // fixed header and the protobuf body.
+        let body_start = Self::HEADER_LEN + header_len as usize;
+        let body_end = body_start + data_len as usize;
+        let (Some(ext), Some(body)) = (
+            bytes.get(Self::HEADER_LEN..body_start),
+            bytes.get(body_start..body_end),
+        ) else {
+            warn!(
+                len = bytes.len(),
+                header_len, data_len, "game command body exceeds buffer"
+            );
+            return None;
+        };
+
         Some(GameCommand {
             command_id,
             header_len,
             data_len,
-            proto_data: data,
+            ext_header: ext.to_vec(),
+            proto_data: body.to_vec(),
+            direction,
         })
+    }
+
+    /// Human-readable packet direction for JSON output: `"sent"` or `"received"`.
+    pub fn direction_str(&self) -> &'static str {
+        match self.direction {
+            PacketDirection::Sent => "sent",
+            PacketDirection::Received => "received",
+        }
     }
 
     pub fn parse_proto<T: protobuf::Message>(&self) -> protobuf::Result<T> {
         T::parse_from_bytes(&self.proto_data)
+    }
+
+    /// Parse the extended header as `PacketHead`. Falls back to the body for
+    /// commands that carry no extended header.
+    pub fn parse_head(&self) -> protobuf::Result<PacketHead> {
+        let bytes = if self.ext_header.is_empty() {
+            &self.proto_data
+        } else {
+            &self.ext_header
+        };
+        protobuf::Message::parse_from_bytes(bytes)
     }
 
     pub fn is_avatar_data_notify(&self) -> bool {
@@ -170,6 +233,26 @@ impl GameCommand {
 
     pub fn is_player_store_notify(&self) -> bool {
         self.command_id == CommandId::PlayerStoreNotify as u16
+    }
+
+    /// Serialize this command to a JSON object for UI display:
+    /// `{cmd_id, name, direction, header_len, size, data}`, where `data` is the
+    /// proto body parsed via reflection, `children` holds any commands this one
+    /// carried, and an id with no known body type still gets a schema-free field
+    /// tree rather than nothing.
+    pub fn to_json(&self) -> serde_json::Value {
+        proto_json::command_to_json(self)
+    }
+
+    /// The commands envelope inside this one, if this is a batch envelope such as
+    /// `UnionCmdNotify`. Empty otherwise.
+    pub fn children(&self) -> Vec<GameCommand> {
+        proto_json::command_children(self)
+    }
+
+    /// Serialize a lightweight summary (no body values) for list display.
+    pub fn summary_json(&self) -> serde_json::Value {
+        proto_json::command_summary_json(self)
     }
 }
 
@@ -189,9 +272,27 @@ pub enum PacketDirection {
     Received,
 }
 
+/// Which key is decrypting the current stream, and where it came from.
+///
+/// The distinction matters to whoever is watching: a stream opened with the
+/// dispatch key only yields the handshake-era packets before everything goes
+/// quiet, and only the session-key origins say whether *this* client process
+/// could be opened at all.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum KeyOrigin {
+    /// The per-version dispatch key, looked up from the packet's own header.
+    Dispatch,
+    /// A session key recovered by XOR-voting a known command body against the
+    /// ciphertext. Works for a process whose handshake we never saw.
+    KnownBody,
+    /// A session key found by searching client-clock seeds around the handshake.
+    /// Only ever works for a process's first login. See [`Self::KnownBody`].
+    TimeSearch,
+}
+
 pub enum Key {
     Dispatch(Vec<u8>),
-    Session(Vec<u8>),
+    Session(Vec<u8>, KeyOrigin),
 }
 
 #[derive(Default)]
@@ -204,6 +305,9 @@ pub struct GameSniffer {
     rsa_keys: Vec<RsaPrivateKey>,
     sent_time: Option<u64>,
     possible_seeds: Vec<u64>,
+    /// Command bodies recovered from earlier sessions, used for a
+    /// known-plaintext recovery of a session key we cannot derive from a seed.
+    known_bodies: Vec<Vec<u8>>,
 }
 
 impl GameSniffer {
@@ -226,6 +330,67 @@ impl GameSniffer {
     pub fn set_initial_keys(mut self, initial_keys: HashMap<u16, Vec<u8>>) -> Self {
         self.initial_keys = initial_keys;
         self
+    }
+
+    /// Teach the sniffer the body of a command that repeats verbatim across
+    /// client processes, so its key can be recovered from ciphertext alone. In
+    /// practice this is the anti-cheat Lua shell body: 167875 bytes, carrying the
+    /// 4096-byte session key 41 times over.
+    pub fn add_known_body(mut self, body: Vec<u8>) -> Self {
+        self.known_bodies.push(body);
+        self
+    }
+
+    /// The command bodies this sniffer can open a future session with: the ones
+    /// injected through [`add_known_body`](Self::add_known_body) plus the ones it
+    /// noted while decrypting. Persist these to carry them into the next process.
+    pub fn known_bodies(&self) -> &[Vec<u8>] {
+        &self.known_bodies
+    }
+
+    /// How the key currently decrypting this stream was obtained, or `None` when
+    /// no key has been found yet.
+    ///
+    /// Report this alongside decoded packets: "no packets decoded" and "only the
+    /// handshake decoded" look identical to whoever is watching unless the origin
+    /// says which one happened.
+    pub fn key_origin(&self) -> Option<KeyOrigin> {
+        match &self.key {
+            Some(Key::Dispatch(_)) => Some(KeyOrigin::Dispatch),
+            Some(Key::Session(_, origin)) => Some(*origin),
+            None => None,
+        }
+    }
+
+    /// Keep a copy of a command body long enough to carry the whole session key,
+    /// so a later session we cannot seed can still be opened. See
+    /// `crypto::key_from_known_body`.
+    fn note_known_body(&mut self, body: &[u8]) {
+        const MIN_BODY_LEN: usize = 2 * KEY_LEN;
+        const MAX_SAMPLES: usize = 4;
+
+        if body.len() < MIN_BODY_LEN
+            || self.known_bodies.iter().any(|kept| kept.len() == body.len())
+        {
+            return;
+        }
+        // Prefer the longest bodies: each 4096 bytes is another copy of the key,
+        // so a region that does vary between sessions still leaves every byte a
+        // clear majority.
+        let shortest = self.known_bodies.iter().map(Vec::len).min().unwrap_or(0);
+        if self.known_bodies.len() == MAX_SAMPLES {
+            if body.len() <= shortest {
+                return;
+            }
+            let worst = self
+                .known_bodies
+                .iter()
+                .position(|kept| kept.len() == shortest)
+                .unwrap();
+            self.known_bodies.remove(worst);
+        }
+        info!(len = body.len(), "noting known command body");
+        self.known_bodies.push(body.to_vec());
     }
 
     #[instrument(skip_all, fields(len = bytes.len()))]
@@ -274,7 +439,7 @@ impl GameSniffer {
             let commands = kcp
                 .receive_segments(kcp_seg)
                 .into_iter()
-                .filter_map(|data| self.receive_command(data))
+                .filter_map(|data| self.receive_command(direction, data))
                 .collect();
 
             return Some(commands);
@@ -284,7 +449,7 @@ impl GameSniffer {
     }
 
     #[instrument(skip_all, fields(len = data.len()))]
-    fn receive_command(&mut self, mut data: Vec<u8>) -> Option<GameCommand> {
+    fn receive_command(&mut self, direction: PacketDirection, mut data: Vec<u8>) -> Option<GameCommand> {
         let key_r = match &self.key {
             None => {
                 let key = lookup_initial_key(&self.initial_keys, &data);
@@ -303,70 +468,55 @@ impl GameSniffer {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45
-                    && test[1] == 0x67
-                    && test[test.len() - 2] == 0x89
-                    && test[test.len() - 1] == 0xAB
-                {
+                if looks_like_command(&test) {
                     self.key.as_ref().unwrap()
                 } else {
-                    let mut discovered_key: Option<&Key> = None;
-                    for &seed in &self.possible_seeds {
-                        // First try with a retained client seed.
-                        if let Some(client_seed) = self.client_seed
-                            && let Some((client_seed, key)) =
-                                bruteforce(client_seed, seed, data.clone())
-                        {
-                            self.client_seed = Some(client_seed);
-                            self.key = Some(Key::Session(key));
-                            discovered_key = self.key.as_ref();
-                            break;
+                    match self.deduce_key(&data) {
+                        Some((origin, key)) => {
+                            self.key = Some(Key::Session(key, origin));
+                            self.key.as_ref().unwrap()
                         }
-
-                        // If that fails, try with a client seed generated from the packet's
-                        // `sent_time`
-                        if let Some((client_seed, key)) =
-                            bruteforce(self.sent_time.unwrap(), seed, data.clone())
-                        {
-                            self.client_seed = Some(client_seed);
-                            self.key = Some(Key::Session(key));
-                            discovered_key = self.key.as_ref();
-                            break;
-                        }
-                    }
-
-                    match discovered_key {
-                        Some(key) => key,
                         None => {
-                            error!("Couldn't bruteforce from deduced keys");
+                            error!("Couldn't deduce the session key");
                             return None;
                         }
                     }
                 }
             }
-            Some(Key::Session(k)) => {
+            Some(Key::Session(k, _)) => {
                 let mut test = data.clone();
                 decrypt_command(k, &mut test);
 
-                if test[0] == 0x45 && test[1] == 0x67 {
-                    //|| test[test.len() - 2] == 0x89 && test[test.len() - 1] == 0xAB
+                if looks_like_command(&test) {
                     self.key.as_ref().unwrap()
                 } else {
+                    // The session key either stopped working because the client
+                    // re-authenticated, or was never right — the time search can
+                    // hit four magic bytes by chance. Try to deduce a key that
+                    // opens *this* packet before giving up on it.
                     warn!("Invalidated session key");
                     self.key = None;
-                    error!("Session key dead, relaunch game");
-                    return None;
+                    match self.deduce_key(&data) {
+                        Some((origin, key)) => {
+                            self.key = Some(Key::Session(key, origin));
+                            self.key.as_ref().unwrap()
+                        }
+                        None => {
+                            error!("Session key dead, relaunch game");
+                            return None;
+                        }
+                    }
                 }
             }
         };
 
         let key = match key_r {
-            Dispatch(k) | Key::Session(k) => k,
+            Dispatch(k) | Key::Session(k, _) => k,
         };
 
         decrypt_command(key, &mut data);
 
-        let command = GameCommand::try_new(data)?;
+        let command = GameCommand::try_new(data, direction)?;
 
         let span = info_span!("command", ?command);
         let _enter = span.enter();
@@ -381,13 +531,17 @@ impl GameSniffer {
         //     return None;
         // }
 
+        if matches!(self.key, Some(Key::Session(..))) {
+            self.note_known_body(&command.proto_data);
+        }
+
         if let Some(Dispatch(_)) = self.key {
             if let Some(possible_seeds) =
                 matches_get_player_token_rsp(command.proto_data.clone(), self.rsa_keys.clone())
             {
                 self.possible_seeds = possible_seeds;
                 info!(?self.possible_seeds, "setting new possible session seeds");
-                let header_command = command.parse_proto::<PacketHead>().unwrap();
+                let header_command = command.parse_head().unwrap();
                 self.sent_time = Some(header_command.sent_ms);
                 info!(?self.sent_time, "setting new send time");
             }
@@ -395,24 +549,91 @@ impl GameSniffer {
 
         Some(command)
     }
+
+    /// Recover the session key that opens `data`.
+    ///
+    /// The time-anchored bruteforce only works for a client process's *first*
+    /// login. Measured across a day of captures: a re-auth inside a long-running
+    /// client keeps the rand key it chose when the process started, and no
+    /// wall-clock time in the 26 hours before its handshake yielded the key. For
+    /// those sessions a known plaintext is the only way in, so try it first — it
+    /// is also orders of magnitude cheaper than searching.
+    #[instrument(skip_all, fields(len = data.len()))]
+    fn deduce_key(&mut self, data: &[u8]) -> Option<(KeyOrigin, Vec<u8>)> {
+        for body in &self.known_bodies {
+            if let Some(key) = key_from_known_body(body, data)
+                && opens_command(&key, data)
+            {
+                info!("recovered session key from a known command body");
+                return Some((KeyOrigin::KnownBody, key));
+            }
+        }
+
+        let seeds = self.possible_seeds.clone();
+        let anchors: Vec<u64> = self.client_seed.into_iter().chain(self.sent_time).collect();
+        let bruteforced = seeds.iter().find_map(|&server| {
+            anchors
+                .iter()
+                .find_map(|&anchor| bruteforce(anchor, server, data.to_vec()))
+        });
+
+        if let Some((time, key)) = bruteforced {
+            self.client_seed = Some(time);
+            return Some((KeyOrigin::TimeSearch, key));
+        }
+        None
+    }
 }
 
 pub fn matches_achievement_packet(game_command: &GameCommand) -> Option<Vec<Achievement>> {
     return matches_achievement_all_data_notify(game_command.proto_data.clone());
 }
 
+/// Heuristic item packet matching — does not depend on command_id.
 pub fn matches_item_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::Item>> {
-    if !game_command.is_player_store_notify() {
-        return None;
-    }
-
     return matches_items_all_data_notify(&game_command.proto_data);
 }
 
+/// Heuristic avatar packet matching — does not depend on command_id.
 pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::protos::AvatarInfo>> {
-    if !game_command.is_avatar_data_notify() {
-        return None;
+    return matches_avatars_all_data_notify(&game_command.proto_data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(header_len: u16, ext: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x45, 0x67, 0x19, 0x81];
+        out.extend_from_slice(&header_len.to_be_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(ext);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&[0x89, 0xAB]);
+        out
     }
 
-    return matches_avatars_all_data_notify(&game_command.proto_data);
+    #[test]
+    fn proto_data_skips_extended_header() {
+        let ext = [0x18, 0x57, 0x30, 0xd0, 0xc5, 0x9d, 0x97, 0x8b, 0x34];
+        let body = [0x12, 0x02, 0x01, 0x02, 0x60, 0x03];
+        let cmd = GameCommand::try_new(frame(9, &ext, &body), PacketDirection::Received).unwrap();
+        assert_eq!(cmd.command_id, 6529);
+        assert_eq!(cmd.ext_header, ext);
+        assert_eq!(cmd.proto_data, body);
+    }
+
+    #[test]
+    fn proto_data_starts_at_10_without_extended_header() {
+        let body = [0x08, 0x01, 0x12, 0x00];
+        let cmd = GameCommand::try_new(frame(0, &[], &body), PacketDirection::Sent).unwrap();
+        assert_eq!(cmd.proto_data, body);
+    }
+
+    #[test]
+    fn rejects_frame_whose_body_exceeds_buffer() {
+        let mut buf = frame(0, &[], &[0x08, 0x01]);
+        buf[6..10].copy_from_slice(&9999u32.to_be_bytes());
+        assert!(GameCommand::try_new(buf, PacketDirection::Sent).is_none());
+    }
 }

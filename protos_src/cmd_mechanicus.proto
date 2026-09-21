@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+import "define.proto";
+
+message MechanicusInfo {
+  repeated uint32 open_sequence_id_list = 1;
+  repeated Uint32Pair gear_level_pair_list = 2;
+  repeated uint32 finish_difficult_level_list = 3;
+  bool is_finish_teach_dungeon = 4;
+  uint32 punish_over_time = 5;
+  uint32 coin = 6;
+  uint32 mechanicus_id = 7;
+}
+
+message GetMechanicusInfoReq {
+}
+
+message GetMechanicusInfoRsp {
+  MechanicusInfo mechanicus_info = 1;
+  int32 retcode = 2;
+}
+
+message MechanicusSequenceOpenNotify {
+  uint32 mechanicus_id = 1;
+  uint32 sequence_id = 2;
+}
+
+message MechanicusCoinNotify {
+  uint32 mechanicus_id = 1;
+  uint32 coin = 2;
+}
+
+message MechanicusOpenNotify {
+  uint32 mechanicus_id = 1;
+}
+
+message MechanicusCloseNotify {
+  uint32 mechanicus_id = 1;
+}
+
+message MechanicusUnlockGearReq {
+  uint32 gear_id = 1;
+  uint32 mechanicus_id = 2;
+}
+
+message MechanicusUnlockGearRsp {
+  int32 retcode = 1;
+  uint32 gear_id = 2;
+  uint32 mechanicus_id = 3;
+}
+
+message MechanicusLevelupGearReq {
+  uint32 gear_id = 1;
+  uint32 mechanicus_id = 2;
+}
+
+message MechanicusLevelupGearRsp {
+  uint32 gear_id = 1;
+  int32 retcode = 2;
+  uint32 mechanicus_id = 3;
+  uint32 after_gear_level = 4;
+}
+
+message EnterMechanicusDungeonReq {
+  uint32 difficult_level = 1;
+}
+
+message EnterMechanicusDungeonRsp {
+  int32 retcode = 1;
+  uint32 wrong_uid = 2;
+  uint32 difficult_level = 3;
+  uint32 dungeon_id = 4;
+}
+
+message MechanicusCandidateTeamCreateReq {
+  uint32 difficult_level = 1;
+}
+
+message MechanicusCandidateTeamCreateRsp {
+  uint32 difficult_level = 1;
+  int32 retcode = 2;
+  uint32 dungeon_id = 3;
+}
