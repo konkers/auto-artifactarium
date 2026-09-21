@@ -96,6 +96,7 @@ mod crypto;
 mod cs_rand;
 mod kcp;
 mod proto_json;
+mod raw_proto;
 mod unk_util;
 
 const PORTS: [u16; 2] = [22101, 22102];
@@ -235,11 +236,18 @@ impl GameCommand {
     }
 
     /// Serialize this command to a JSON object for UI display:
-    /// `{cmd_id, name, direction, header_len, size, data}` where `data` is the
-    /// proto body parsed via reflection. Returns `None` for command ids whose
-    /// body message type is unknown.
-    pub fn to_json(&self) -> Option<serde_json::Value> {
+    /// `{cmd_id, name, direction, header_len, size, data}`, where `data` is the
+    /// proto body parsed via reflection, `children` holds any commands this one
+    /// carried, and an id with no known body type still gets a schema-free field
+    /// tree rather than nothing.
+    pub fn to_json(&self) -> serde_json::Value {
         proto_json::command_to_json(self)
+    }
+
+    /// The commands envelope inside this one, if this is a batch envelope such as
+    /// `UnionCmdNotify`. Empty otherwise.
+    pub fn children(&self) -> Vec<GameCommand> {
+        proto_json::command_children(self)
     }
 
     /// Serialize a lightweight summary (no body values) for list display.

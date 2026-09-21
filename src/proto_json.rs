@@ -12,6 +12,7 @@ use protobuf::reflect::ReflectValueRef;
 use protobuf::MessageDyn;
 
 use crate::GameCommand;
+use crate::raw_proto::field_tree;
 
 include!(concat!(env!("OUT_DIR"), "/cmd_id_map.rs"));
 
@@ -30,33 +31,115 @@ fn resolve_message(command_id: u16) -> Option<(String, protobuf::reflect::Messag
 }
 
 /// Serialize a single decoded `GameCommand` to `{cmd_id, name, size, data}`.
-/// Returns `None` when the command id has no known body message type.
-pub fn command_to_json(cmd: &GameCommand) -> Option<serde_json::Value> {
-    let (name, desc) = resolve_message(cmd.command_id)?;
-
-    let base = serde_json::json!({
+///
+/// A command whose id has no known body message still gets a body: the schema-free
+/// field tree, so an unrecognised packet is readable rather than absent.
+pub fn command_to_json(cmd: &GameCommand) -> serde_json::Value {
+    let mut base = serde_json::json!({
         "cmd_id": cmd.command_id,
-        "name": name,
+        "name": "unknown",
         "direction": cmd.direction_str(),
         "header_len": cmd.header_len,
         "size": cmd.proto_data.len(),
     });
 
+    let Some((name, desc)) = resolve_message(cmd.command_id) else {
+        base["raw_fields"] = field_tree(&cmd.proto_data);
+        return base;
+    };
+    base["name"] = serde_json::Value::String(name);
+
     match desc.parse_from_bytes(&cmd.proto_data) {
         Ok(msg) => {
-            let data = msg_to_value(&*msg);
-            let mut v = base;
-            v["data"] = data;
-            Some(v)
+            base["data"] = msg_to_value(&*msg);
+            let children = command_children(cmd);
+            if !children.is_empty() {
+                base["children"] =
+                    serde_json::Value::Array(children.iter().map(command_to_json).collect());
+            }
+            base
         }
         Err(e) => {
-            let mut v = base;
-            v["parse_error"] = serde_json::json!(e.to_string());
-            v["raw"] = serde_json::json!(base64::engine::general_purpose::STANDARD
-                .encode(&cmd.proto_data));
-            Some(v)
+            base["parse_error"] = serde_json::json!(e.to_string());
+            base["raw_fields"] = field_tree(&cmd.proto_data);
+            base
         }
     }
+}
+
+/// The commands a batch envelope carries, empty for anything else.
+///
+/// `UnionCmdNotify` wraps N commands as `{ message_id, body }` pairs, so a whole
+/// scene's worth of traffic can arrive under a single command id — invisible to a
+/// list that only sees the envelope. The pair is recognised by shape rather than
+/// by name: measured over the whole V70 schema, `UnionCmd` is the only message
+/// with exactly one `*_id` unsigned integer field and one `body` bytes field, so
+/// the shape is unambiguous here and does not have to be re-learned every version
+/// the way an id table would.
+pub fn command_children(cmd: &GameCommand) -> Vec<GameCommand> {
+    let Some((_, desc)) = resolve_message(cmd.command_id) else {
+        return Vec::new();
+    };
+    let Ok(msg) = desc.parse_from_bytes(&cmd.proto_data) else {
+        return Vec::new();
+    };
+
+    let mut children = Vec::new();
+    for list in msg.descriptor_dyn().fields() {
+        if !list.is_repeated() {
+            continue;
+        }
+        for item in list.get_repeated(&*msg) {
+            let ReflectValueRef::Message(item) = item else {
+                continue;
+            };
+            if let Some(child) = batch_item(&*item, cmd.direction) {
+                children.push(child);
+            }
+        }
+    }
+    children
+}
+
+/// One `{ *_id, body }` pair as a command, if this message is shaped like one.
+fn batch_item(item: &dyn MessageDyn, direction: crate::PacketDirection) -> Option<GameCommand> {
+    let mut message_id: Option<u64> = None;
+    let mut body: Option<&[u8]> = None;
+    let mut present = 0usize;
+
+    for field in item.descriptor_dyn().fields() {
+        // A batch item is exactly two singular fields; anything collection-shaped
+        // means this is some other message that happened to be nested in a list.
+        if field.is_map() || field.is_repeated() {
+            return None;
+        }
+        if !field.has_field(item) {
+            continue;
+        }
+        present += 1;
+        let value = field.get_singular(item)?;
+        match &value {
+            ReflectValueRef::U32(v) if field.name().ends_with("_id") => message_id = Some(*v as u64),
+            ReflectValueRef::U64(v) if field.name().ends_with("_id") => message_id = Some(*v),
+            ReflectValueRef::Bytes(b) if field.name() == "body" => body = Some(b),
+            _ => return None,
+        }
+    }
+    if present != 2 {
+        return None;
+    }
+
+    let (Some(message_id), Some(body)) = (message_id, body) else {
+        return None;
+    };
+    Some(GameCommand {
+        command_id: message_id as u16,
+        header_len: 0,
+        data_len: body.len() as u32,
+        ext_header: Vec::new(),
+        proto_data: body.to_vec(),
+        direction,
+    })
 }
 
 /// Serialize a lightweight summary of a `GameCommand` for list display:
@@ -215,17 +298,87 @@ mod tests {
         }
     }
 
+    /// Minimal protobuf varint encoder, so the fixtures above stay readable.
+    fn varint(mut value: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
     #[test]
-    fn unknown_cmd_returns_none() {
+    fn an_unknown_cmd_still_renders_a_field_tree() {
+        let cmd = GameCommand {
+            command_id: 0xFFFF,
+            header_len: 0,
+            data_len: 13,
+            proto_data: vec![0x08, 0x2a, 0x12, 0x0b, b'h', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd'],
+            ext_header: Vec::new(),
+            direction: PacketDirection::Received,
+        };
+        let json = cmd.to_json();
+        assert_eq!(json["name"], "unknown");
+        assert_eq!(json["raw_fields"]["1"], 42);
+        assert_eq!(json["raw_fields"]["2"], "hello world");
+    }
+
+    #[test]
+    fn a_batch_envelope_yields_its_inner_commands() {
+        // UnionCmdNotify { repeated UnionCmd cmd_list = 11 }
+        // UnionCmd   { uint32 message_id = 15; bytes body = 8 }
+        let item = |id: u32, body: &[u8]| -> Vec<u8> {
+            let mut out = vec![0x78];
+            out.extend(varint(id));
+            out.push(0x42);
+            out.push(body.len() as u8);
+            out.extend_from_slice(body);
+            let mut envelope = vec![0x5a, out.len() as u8];
+            envelope.extend_from_slice(&out);
+            envelope
+        };
+        let mut proto_data = item(2092, b"one");
+        proto_data.extend_from_slice(&item(6586, b"two"));
+
+        let cmd = GameCommand {
+            command_id: 7516,
+            header_len: 0,
+            data_len: proto_data.len() as u32,
+            proto_data,
+            ext_header: Vec::new(),
+            direction: PacketDirection::Received,
+        };
+
+        let children = cmd.children();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].command_id, 2092);
+        assert_eq!(children[0].proto_data, b"one");
+        assert_eq!(children[1].command_id, 6586);
+        assert_eq!(children[1].direction, PacketDirection::Received);
+
+        // And the rendered body carries them, so one detail view shows the batch.
+        let json = cmd.to_json();
+        assert_eq!(json["name"], "UnionCmdNotify");
+        assert_eq!(json["children"].as_array().unwrap().len(), 2);
+        assert_eq!(json["children"][1]["cmd_id"], 6586);
+    }
+
+    #[test]
+    fn a_command_that_is_not_a_batch_has_no_children() {
         let cmd = GameCommand {
             command_id: 0xFFFF,
             header_len: 0,
             data_len: 0,
             proto_data: Vec::new(),
             ext_header: Vec::new(),
-            direction: PacketDirection::Received,
+            direction: PacketDirection::Sent,
         };
-        assert!(cmd.to_json().is_none());
+        assert!(cmd.children().is_empty());
     }
 
     #[test]
@@ -287,7 +440,7 @@ mod tests {
             direction: PacketDirection::Sent,
         };
 
-        let json = cmd.to_json().expect("AvatarDataNotify is a known command");
+        let json = cmd.to_json();
         assert_eq!(json["cmd_id"], 6586);
         assert_eq!(json["name"], "AvatarDataNotify");
         assert_eq!(json["direction"], "sent");
@@ -314,10 +467,10 @@ mod tests {
             ext_header: Vec::new(),
             direction: PacketDirection::Received,
         };
-        let json = cmd.to_json().expect("known command still returns an object");
+        let json = cmd.to_json();
         assert_eq!(json["name"], "AvatarDataNotify");
         assert_eq!(json["direction"], "received");
         assert!(json.get("parse_error").is_some());
-        assert!(json.get("raw").is_some());
+        assert!(json.get("raw_fields").is_some());
     }
 }
