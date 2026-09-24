@@ -10,6 +10,7 @@ use crate::r#gen::protos::AvatarDataNotify;
 use crate::r#gen::protos::AvatarInfo;
 use crate::r#gen::protos::Item;
 use crate::r#gen::protos::PacketWithItems;
+use crate::r#gen::protos::PropMapEntry;
 use crate::r#gen::protos::Unk;
 
 pub fn matches_get_player_token_rsp(
@@ -207,4 +208,51 @@ pub fn matches_avatars_all_data_notify(data: &[u8]) -> Option<Vec<AvatarInfo>> {
     }
 
     Some(avatar_list)
+}
+
+/// `PROP_PLAYER_SCOIN`: the player's Mora balance.
+const PROP_PLAYER_SCOIN: u32 = 10016;
+
+/// Extract the player property map carried by `PlayerDataNotify` (on login) and
+/// `PlayerPropNotify` (whenever a property changes).
+///
+/// The packet is recognised by content rather than by command id or field
+/// number, since both are reshuffled every game version. Player property ids
+/// (`PROP_PLAYER_*`, 10000-10999) are stable, and genuine entries repeat their
+/// key in `PropValue.type`, which unrelated fields practically never do.
+pub fn matches_player_prop_map(data: &[u8]) -> Option<HashMap<u32, i64>> {
+    let d_msg = Unk::parse_from_bytes(data).ok()?;
+    let mut props: HashMap<u32, i64> = HashMap::new();
+    let mut map_tag: Option<u32> = None;
+    for (field_number, field_data) in d_msg.unknown_fields().iter() {
+        let LengthDelimited(bytes) = field_data else {
+            continue;
+        };
+        let Ok(entry) = PropMapEntry::parse_from_bytes(bytes) else {
+            continue;
+        };
+        if !(10000..11000).contains(&entry.key) || entry.value.type_ != entry.key {
+            continue;
+        }
+        // All entries of one map share a field number.
+        if *map_tag.get_or_insert(field_number) != field_number {
+            return None;
+        }
+        // `val` carries the current amount; fall back to the `ival` oneof for
+        // entries that only populate the older field.
+        let value = if entry.value.val != 0 {
+            entry.value.val
+        } else {
+            entry.value.ival()
+        };
+        props.insert(entry.key, value);
+    }
+
+    // Only report packets that carry Mora, so frequent unrelated prop updates
+    // (stamina and the like) don't register as new data.
+    if !props.contains_key(&PROP_PLAYER_SCOIN) {
+        return None;
+    }
+
+    Some(props)
 }

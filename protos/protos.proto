@@ -172,3 +172,11 @@ message AvatarDataNotify {
     repeated AvatarInfo avatar_list = 7;
     //map<uint32, AvatarTeam> avatar_team_map = 14;
 }
+
+// One entry of a `map<uint32, PropValue>`, decoded on its own so a player prop
+// map can be located without knowing its field number, which changes with every
+// game version.
+message PropMapEntry {
+    uint32 key = 1;
+    PropValue value = 2;
+}
