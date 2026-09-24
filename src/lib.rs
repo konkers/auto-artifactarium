@@ -60,7 +60,7 @@ use crate::kcp::KcpSniffer;
 pub use crate::unk_util::Achievement;
 pub use crate::unk_util::{
     matches_achievement_all_data_notify, matches_avatars_all_data_notify,
-    matches_get_player_token_rsp, matches_items_all_data_notify,
+    matches_get_player_token_rsp, matches_items_all_data_notify, matches_player_prop_map,
 };
 
 fn bytes_as_hex(bytes: &[u8]) -> String {
@@ -415,4 +415,12 @@ pub fn matches_avatar_packet(game_command: &GameCommand) -> Option<Vec<r#gen::pr
     }
 
     return matches_avatars_all_data_notify(&game_command.proto_data);
+}
+
+/// Player property map (includes Mora as `PROP_PLAYER_SCOIN`). Matched by
+/// content, so it keeps working when command ids are reshuffled.
+pub fn matches_player_data_packet(
+    game_command: &GameCommand,
+) -> Option<std::collections::HashMap<u32, i64>> {
+    return matches_player_prop_map(&game_command.proto_data);
 }
